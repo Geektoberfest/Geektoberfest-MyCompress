@@ -1,0 +1,11 @@
+[package]
+name = "mycompress-core"
+description = "Compression engine and .mcz archive library for MyCompress"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Intentionally empty: the core library has no third-party dependencies.

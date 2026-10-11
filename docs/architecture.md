@@ -18,7 +18,15 @@ directory.
 Extraction opens and validates the archive, checks every path against the
 destination, decompresses and verifies file data, then creates directories and
 files. Files are created without overwrite by default; `--force` enables
-replacement.
+replacement. Modification times and supported permissions are restored on a
+best-effort basis for both files and directories: directory metadata is restored
+in reverse depth order after all entries and children have been extracted so
+child processing does not alter parent modification times. Pre-existing
+directories matching archive entries have their metadata updated, whereas the
+destination root directory itself remains untouched. On Unix, permission bits
+are masked to `0o777` (setuid, setgid, and sticky bits are never restored); on
+Windows, write permissions map to the read-only attribute. Failures to restore
+metadata do not abort extraction.
 
 ## Modules
 

@@ -69,8 +69,16 @@ pub fn extract(
 /// - setuid/setgid/sticky permission bits are never restored.
 ///
 /// Existing directories are reused; existing files are never touched without
-/// `force`. Modification time and permissions are restored on a best-effort
-/// basis for files (directory metadata is not restored yet).
+/// `force`. Modification times and supported permissions are restored on a
+/// best-effort basis for both files and directories. For directory entries
+/// present in the archive, metadata is restored in reverse depth order after
+/// all entries and children have been extracted so child processing does not
+/// alter parent modification times; pre-existing directories matching archive
+/// entries have their metadata updated, while the destination root directory
+/// itself is untouched. On Unix, permission bits are masked to `0o777`
+/// (setuid, setgid, and sticky bits are never restored). On Windows, permissions
+/// map missing write bits to the read-only attribute. Failures to restore metadata
+/// are ignored and do not cause extraction to fail.
 pub fn extract_from_reader(
     reader: &mut ArchiveReader,
     dest: &Path,
@@ -80,6 +88,7 @@ pub fn extract_from_reader(
 
     let mut stats = ExtractStats::default();
     let metadata: Vec<_> = reader.entries().to_vec();
+    let mut pending_dirs = Vec::new();
     for (index, entry) in metadata.iter().enumerate() {
         // Re-validate even though the reader already did: cheap and safe.
         let relative = paths::parse_archive_path(&entry.path)?;
@@ -102,6 +111,12 @@ pub fn extract_from_reader(
                         .map_err(|e| file_op("create directory", &target, e))?;
                     stats.dirs_created += 1;
                 }
+                pending_dirs.push(PendingDir {
+                    target,
+                    depth: relative.components().count(),
+                    mtime: entry.mtime,
+                    mode: entry.mode,
+                });
             }
             EntryKind::File => {
                 // Decompress + verify (size and CRC32) before touching disk.
@@ -144,7 +159,27 @@ pub fn extract_from_reader(
             }
         }
     }
+
+    // Restore directory metadata in reverse depth order (deepest child directory first)
+    // so processing child entries does not alter parent modification times.
+    pending_dirs.sort_by_key(|b| std::cmp::Reverse(b.depth));
+    for dir in pending_dirs {
+        if dir.mtime != 0 {
+            restore_mtime(&dir.target, dir.mtime);
+        }
+        if dir.mode != 0 {
+            restore_mode(&dir.target, dir.mode);
+        }
+    }
+
     Ok(stats)
+}
+
+struct PendingDir {
+    target: std::path::PathBuf,
+    depth: usize,
+    mtime: u64,
+    mode: u32,
 }
 
 fn prepare_destination(dest: &Path) -> Result<()> {
@@ -163,12 +198,37 @@ fn prepare_destination(dest: &Path) -> Result<()> {
     }
 }
 
-/// Best-effort restoration of a file's modification time.
+/// Best-effort restoration of a file or directory modification time.
 fn restore_mtime(path: &Path, secs: u64) {
     let Some(time) = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs)) else {
         return; // Implausible timestamp; ignore.
     };
-    if let Ok(file) = OpenOptions::new().write(true).open(path) {
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .or_else(|_| {
+                OpenOptions::new()
+                    .write(true)
+                    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                    .open(path)
+            })
+            .or_else(|_| OpenOptions::new().write(true).open(path))
+    };
+    #[cfg(unix)]
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .or_else(|_| fs::File::open(path));
+    #[cfg(not(any(windows, unix)))]
+    let file = OpenOptions::new().write(true).open(path);
+
+    if let Ok(file) = file {
         let _ = file.set_modified(time);
     }
 }

@@ -312,3 +312,221 @@ fn huffman_directory_round_trip() {
         assert_eq!(src, dst, "content mismatch for '{rel}'");
     }
 }
+
+fn set_test_mtime(path: &Path, stamp: SystemTime) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .or_else(|_| std::fs::OpenOptions::new().write(true).open(path))
+            .unwrap()
+            .set_modified(stamp)
+            .unwrap();
+    }
+    #[cfg(unix)]
+    {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .or_else(|_| std::fs::File::open(path))
+            .unwrap()
+            .set_modified(stamp)
+            .unwrap();
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = path;
+        let _ = stamp;
+    }
+}
+
+fn assert_timestamp_matches(actual: SystemTime, expected_secs: u64) {
+    let actual_secs = actual
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let diff = actual_secs.abs_diff(expected_secs);
+    assert!(
+        diff <= 2,
+        "timestamp differs by more than platform precision: expected {expected_secs}, got {actual_secs} (diff {diff}s > 2s)"
+    );
+}
+
+#[test]
+fn directory_modification_times_are_preserved() {
+    let dir = common::TempDir::new("dir-mtime");
+    let input = dir.path().join("input");
+    let sub = input.join("subdir");
+    fs::create_dir_all(&sub).unwrap();
+    let file = sub.join("file.txt");
+    fs::write(&file, b"content").unwrap();
+
+    let stamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_000);
+    set_test_mtime(&sub, stamp);
+
+    let archive = dir.path().join("a.mcz");
+    let out = dir.path().join("out");
+    files::compress(&input, &archive, &options(), &Registry::new()).unwrap();
+    files::extract(&archive, &out, &ExtractOptions::default(), &Registry::new()).unwrap();
+
+    let restored = fs::metadata(out.join("subdir"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_timestamp_matches(restored, 1_600_000_000);
+}
+
+#[test]
+fn nested_directory_timestamps_are_preserved() {
+    let dir = common::TempDir::new("nested-dir-mtime");
+    let input = dir.path().join("input");
+    let level1 = input.join("level1");
+    let level2 = level1.join("level2");
+    let level3 = level2.join("level3");
+    fs::create_dir_all(&level3).unwrap();
+    fs::write(level3.join("leaf.txt"), b"leaf data").unwrap();
+    fs::write(level2.join("mid.txt"), b"mid data").unwrap();
+    fs::write(level1.join("top.txt"), b"top data").unwrap();
+
+    let stamp1 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_100);
+    let stamp2 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_200);
+    let stamp3 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_300);
+
+    // Set timestamps deepest first so setting parents is not affected by child creation
+    set_test_mtime(&level3, stamp3);
+    set_test_mtime(&level2, stamp2);
+    set_test_mtime(&level1, stamp1);
+
+    let archive = dir.path().join("a.mcz");
+    let out = dir.path().join("out");
+    files::compress(&input, &archive, &options(), &Registry::new()).unwrap();
+    files::extract(&archive, &out, &ExtractOptions::default(), &Registry::new()).unwrap();
+
+    let restored1 = fs::metadata(out.join("level1"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let restored2 = fs::metadata(out.join("level1/level2"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let restored3 = fs::metadata(out.join("level1/level2/level3"))
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    assert_timestamp_matches(restored1, 1_600_000_100);
+    assert_timestamp_matches(restored2, 1_600_000_200);
+    assert_timestamp_matches(restored3, 1_600_000_300);
+}
+
+#[test]
+fn empty_directory_timestamps_are_preserved() {
+    let dir = common::TempDir::new("empty-dir-mtime");
+    let input = dir.path().join("input");
+    let empty_dir = input.join("empty_folder");
+    fs::create_dir_all(&empty_dir).unwrap();
+
+    let stamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_500);
+    set_test_mtime(&empty_dir, stamp);
+
+    let archive = dir.path().join("a.mcz");
+    let out = dir.path().join("out");
+    files::compress(&input, &archive, &options(), &Registry::new()).unwrap();
+    files::extract(&archive, &out, &ExtractOptions::default(), &Registry::new()).unwrap();
+
+    let restored_path = out.join("empty_folder");
+    assert!(restored_path.is_dir());
+    assert_eq!(fs::read_dir(&restored_path).unwrap().count(), 0);
+
+    let restored = fs::metadata(&restored_path).unwrap().modified().unwrap();
+    assert_timestamp_matches(restored, 1_600_000_500);
+}
+
+#[test]
+#[cfg(unix)]
+fn directory_permissions_are_preserved() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = common::TempDir::new("dir-perms");
+    let input = dir.path().join("input");
+    let restricted = input.join("restricted");
+    fs::create_dir_all(&restricted).unwrap();
+    fs::write(restricted.join("file.txt"), b"inner").unwrap();
+    fs::set_permissions(&restricted, fs::Permissions::from_mode(0o750)).unwrap();
+
+    let archive = dir.path().join("a.mcz");
+    let out = dir.path().join("out");
+    files::compress(&input, &archive, &options(), &Registry::new()).unwrap();
+    files::extract(&archive, &out, &ExtractOptions::default(), &Registry::new()).unwrap();
+
+    let mode = fs::metadata(out.join("restricted"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o750);
+}
+
+#[test]
+#[cfg(unix)]
+fn directory_permissions_strip_special_bits() {
+    use mycompress_core::ArchiveWriter;
+    use std::io::Cursor;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = common::TempDir::new("dir-special-bits");
+    let out = dir.path().join("out");
+    let reg = Registry::new();
+    let rle = reg.get_by_name("rle").unwrap();
+
+    let mut buf = Vec::new();
+    {
+        let mut writer = ArchiveWriter::new(Cursor::new(&mut buf), rle).unwrap();
+        // 0o4755 has setuid bit set
+        writer.add_dir("setuid_dir", 0o4755, 0).unwrap();
+        writer.finish().unwrap();
+    }
+
+    let mut reader = ArchiveReader::new(Cursor::new(buf), &reg).unwrap();
+    files::extract_from_reader(&mut reader, &out, &ExtractOptions::default()).unwrap();
+
+    let mode = fs::metadata(out.join("setuid_dir"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o755);
+    assert_eq!(
+        mode & 0o7000,
+        0,
+        "setuid/setgid/sticky bits must not be restored"
+    );
+}
+
+#[test]
+fn pre_existing_directory_metadata_is_restored() {
+    let dir = common::TempDir::new("pre-existing-dir");
+    let input = dir.path().join("input");
+    let sub = input.join("reused_dir");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("new_file.txt"), b"payload").unwrap();
+
+    let archive_stamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_600_000_800);
+    set_test_mtime(&sub, archive_stamp);
+
+    let archive = dir.path().join("a.mcz");
+    files::compress(&input, &archive, &options(), &Registry::new()).unwrap();
+
+    // Prepare destination with pre-existing directory having an older timestamp
+    let out = dir.path().join("out");
+    let out_sub = out.join("reused_dir");
+    fs::create_dir_all(&out_sub).unwrap();
+    let old_stamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_500_000_000);
+    set_test_mtime(&out_sub, old_stamp);
+
+    files::extract(&archive, &out, &ExtractOptions::default(), &Registry::new()).unwrap();
+
+    let restored = fs::metadata(&out_sub).unwrap().modified().unwrap();
+    assert_timestamp_matches(restored, 1_600_000_800);
+}

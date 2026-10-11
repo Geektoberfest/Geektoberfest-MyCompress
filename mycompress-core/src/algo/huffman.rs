@@ -65,7 +65,6 @@ fn encode(data: &[u8]) -> Vec<u8> {
         return Vec::new();
     }
 
-    // 1. Frequency counting.
     let mut freqs = [0u64; 256];
     for &byte in data {
         freqs[byte as usize] += 1;
@@ -78,7 +77,8 @@ fn encode(data: &[u8]) -> Vec<u8> {
         }
     }
 
-    // 2. Single-symbol optimization.
+    // A single distinct symbol cannot form a non-degenerate binary tree.
+    // Store it as a fixed 11-byte record without an empty or degenerate bitstream.
     if used_symbols.len() == 1 {
         let (sym, _) = used_symbols[0];
         let mut out = Vec::with_capacity(11);
@@ -88,7 +88,8 @@ fn encode(data: &[u8]) -> Vec<u8> {
         return out;
     }
 
-    // 3. Iterative Huffman tree building with deterministic tie-breaking.
+    // Build the tree iteratively using an array-backed node store. Tie-breaking by
+    // (weight, min_symbol, node_index) guarantees deterministic code trees across runs.
     let mut nodes: Vec<BuildNode> = Vec::with_capacity(used_symbols.len() * 2);
     let mut leaf_indices = [None; 256];
     let mut heap: BinaryHeap<Reverse<(u64, u8, usize)>> = BinaryHeap::new();
@@ -116,7 +117,7 @@ fn encode(data: &[u8]) -> Vec<u8> {
         heap.push(Reverse((combined_weight, min_symbol, parent_idx)));
     }
 
-    // 4. Derive code lengths by traversing parent links (no recursion).
+    // Derive code lengths iteratively by walking parent links, avoiding recursion.
     let mut code_lengths: Vec<(u8, u8)> = Vec::with_capacity(used_symbols.len());
     for &(sym, _) in &used_symbols {
         let leaf = leaf_indices[sym as usize].expect("leaf exists");
@@ -129,7 +130,7 @@ fn encode(data: &[u8]) -> Vec<u8> {
         code_lengths.push((sym, depth));
     }
 
-    // 5. Canonical code assignment. Sort by (code_length, symbol) ascending.
+    // Assign canonical prefix codes by sorting (code_length, symbol) ascending.
     code_lengths.sort_by_key(|&(sym, len)| (len, sym));
 
     let mut canonical_codes = [(0u64, 0u8); 256];
@@ -147,7 +148,7 @@ fn encode(data: &[u8]) -> Vec<u8> {
         canonical_codes[sym as usize] = (current_code, len);
     }
 
-    // 6. Serialize header and code table.
+    // Serialize fixed header, code table pairs, and MSB-first packed bitstream.
     let mut out = Vec::with_capacity(10 + code_lengths.len() * 2 + data.len() / 2);
     out.extend_from_slice(&(data.len() as u64).to_le_bytes());
     out.extend_from_slice(&(code_lengths.len() as u16).to_le_bytes());
@@ -156,7 +157,6 @@ fn encode(data: &[u8]) -> Vec<u8> {
         out.push(len);
     }
 
-    // 7. Pack bitstream (MSB-first).
     let mut bit_writer = BitWriter::new(data.len() / 2);
     for &byte in data {
         let (code, len) = canonical_codes[byte as usize];
@@ -246,7 +246,6 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
         )));
     }
 
-    // Single-symbol stream decoding.
     if symbol_count == 1 {
         if data.len() < 11 {
             return Err(Error::TruncatedArchive(
@@ -278,7 +277,6 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
         return Ok(out);
     }
 
-    // Multi-symbol decoding.
     let table_bytes = symbol_count.checked_mul(2).ok_or_else(|| {
         Error::CorruptArchive("code table size calculation overflowed".to_string())
     })?;
@@ -312,7 +310,8 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
         pairs.push((sym, len));
     }
 
-    // Validate Kraft-McMillan equality: sum of 2^(64 - len) must be exactly 2^64.
+    // Verify Kraft-McMillan equality: sum of 2^(64 - len) must equal exactly 2^64
+    // for a complete binary prefix code.
     let mut kraft_sum: u128 = 0;
     for &(_, len) in &pairs {
         kraft_sum = kraft_sum
@@ -327,7 +326,8 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
     }
 
     let bitstream = &data[header_end..];
-    // Each decoded symbol requires at least 1 bit from the bitstream.
+    // Each decoded symbol consumes at least 1 bit. Bounding the declared length against
+    // theoretical bitstream capacity prevents unbounded allocations on corrupt headers.
     let max_possible_symbols = (bitstream.len() as u64).saturating_mul(8);
     if uncompressed_len > max_possible_symbols {
         return Err(Error::CorruptArchive(format!(
@@ -335,10 +335,9 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
         )));
     }
 
-    // Sort into canonical order: (code_length, symbol) ascending.
     pairs.sort_by_key(|&(sym, len)| (len, sym));
 
-    // Build decoding trie.
+    // Reconstruct the canonical prefix tree for bitstream traversal.
     let mut tree = vec![DecodeNode {
         left: None,
         right: None,
@@ -438,7 +437,7 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
         )));
     };
 
-    // Verify padding bits in the final byte are all zero.
+    // Verify padding bits in the final byte are zero to detect corrupt bitstreams.
     if finished_bit > 0 {
         let padding_mask = (1u8 << finished_bit) - 1;
         if bitstream[finished_byte] & padding_mask != 0 {
@@ -448,7 +447,7 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
         }
     }
 
-    // Verify no trailing unused bytes remain.
+    // Reject unconsumed trailing bytes.
     if finished_byte + 1 < bitstream.len() {
         return Err(Error::CorruptArchive(format!(
             "trailing bytes in Huffman stream: {} unused bytes remain",
@@ -542,19 +541,19 @@ mod tests {
 
     #[test]
     fn decoder_rejects_single_symbol_malformations() {
-        // Missing symbol byte
+        // Truncated header missing single-symbol byte.
         let mut truncated = Vec::new();
         truncated.extend_from_slice(&10u64.to_le_bytes());
         truncated.extend_from_slice(&1u16.to_le_bytes());
         assert!(decode(&truncated).is_err());
 
-        // Trailing byte
+        // Trailing bytes after the 11-byte single-symbol payload.
         let mut trailing = truncated.clone();
         trailing.push(b'a');
         trailing.push(b'b');
         assert!(decode(&trailing).is_err());
 
-        // Declared length zero
+        // Non-empty stream declaring zero uncompressed length.
         let mut zero_len = Vec::new();
         zero_len.extend_from_slice(&0u64.to_le_bytes());
         zero_len.extend_from_slice(&1u16.to_le_bytes());
@@ -566,30 +565,29 @@ mod tests {
     fn decoder_rejects_invalid_code_tables() {
         let valid = encode(b"ab");
 
-        // Duplicate symbol in code table
+        // Duplicate symbol in code table.
         let mut dup_sym = valid.clone();
-        dup_sym[10] = b'a'; // symbol 1
-        dup_sym[12] = b'a'; // symbol 2 made identical to symbol 1
+        dup_sym[10] = b'a';
+        dup_sym[12] = b'a';
         assert!(matches!(decode(&dup_sym), Err(Error::CorruptArchive(_))));
 
-        // Out-of-range length: 0
+        // Code length cannot be 0.
         let mut zero_len = valid.clone();
         zero_len[11] = 0;
         assert!(matches!(decode(&zero_len), Err(Error::CorruptArchive(_))));
 
-        // Out-of-range length: > 64
+        // Code length cannot exceed MAX_CODE_LEN (64).
         let mut large_len = valid.clone();
         large_len[11] = 65;
         assert!(matches!(decode(&large_len), Err(Error::CorruptArchive(_))));
 
-        // Under-subscribed lengths (e.g. lengths [2, 2], sum = 1/4 + 1/4 = 1/2 != 1)
+        // Under-subscribed code lengths (Kraft sum < 1).
         let mut under_sub = valid.clone();
         under_sub[11] = 2;
         under_sub[13] = 2;
         assert!(matches!(decode(&under_sub), Err(Error::CorruptArchive(_))));
 
-        // Over-subscribed lengths (e.g. lengths [1, 1], sum = 1/2 + 1/2 = 1 is ok, but [1, 1, 1]...)
-        // Let's create a 3-symbol table with lengths [1, 1, 1] (Kraft sum > 1)
+        // Over-subscribed code lengths (Kraft sum > 1).
         let mut over_sub = Vec::new();
         over_sub.extend_from_slice(&10u64.to_le_bytes());
         over_sub.extend_from_slice(&3u16.to_le_bytes());
@@ -603,17 +601,17 @@ mod tests {
     fn decoder_rejects_inconsistent_and_hostile_lengths() {
         let valid = encode(b"abcdefgh");
 
-        // Declared length larger than bitstream can produce
+        // Declared length exceeds maximum possible symbols from bitstream.
         let mut fake_len = valid.clone();
         fake_len[0..8].copy_from_slice(&100_000u64.to_le_bytes());
         assert!(matches!(decode(&fake_len), Err(Error::CorruptArchive(_))));
 
-        // Hostile huge declared length
+        // Hostile declared length on multi-symbol payload is rejected before allocation.
         let mut huge_len = valid;
         huge_len[0..8].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(matches!(decode(&huge_len), Err(Error::CorruptArchive(_))));
 
-        // Hostile huge single-symbol declared length
+        // Hostile declared length on single-symbol payload is rejected before allocation.
         let mut huge_single = Vec::new();
         huge_single.extend_from_slice(&u64::MAX.to_le_bytes());
         huge_single.extend_from_slice(&1u16.to_le_bytes());
@@ -628,7 +626,7 @@ mod tests {
     fn decoder_rejects_trailing_bytes_and_bad_padding() {
         let valid = encode(b"abcdefgh");
 
-        // Trailing byte
+        // Trailing unused bytes after the bitstream.
         let mut with_trailing = valid.clone();
         with_trailing.push(0x55);
         assert!(matches!(
@@ -636,11 +634,10 @@ mod tests {
             Err(Error::CorruptArchive(_))
         ));
 
-        // Corrupted padding bits
-        // Find last byte and flip the lowest bit (if it was padding)
-        let mut corrupted_padding = encode(b"ab"); // "ab" produces 2 symbols with 1-bit codes = 2 bits payload, 6 bits padding
+        // Non-zero padding bits in the final byte.
+        let mut corrupted_padding = encode(b"ab");
         let last_idx = corrupted_padding.len() - 1;
-        corrupted_padding[last_idx] |= 1; // set padding bit 0
+        corrupted_padding[last_idx] |= 1;
         assert!(matches!(
             decode(&corrupted_padding),
             Err(Error::CorruptArchive(_))

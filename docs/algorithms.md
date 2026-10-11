@@ -16,12 +16,47 @@ RLE is a small, dependency-free format intended for predictable behavior and
 fast operation. It is not a general-purpose replacement for modern formats
 such as zstd or gzip; data without repeated bytes may become slightly larger.
 
+## Huffman
+
+Huffman coding is a built-in algorithm with ID `2`. It generates canonical
+variable-length prefix codes based on byte frequencies, assigning shorter bit
+sequences to more frequent symbols.
+
+Huffman coding is well suited for inputs with non-uniform symbol frequencies,
+such as plain text, source code, or structured binary data, even when identical
+bytes do not appear in consecutive runs.
+
+Limitations:
+- **Metadata overhead on tiny inputs**: storing uncompressed length and the
+  code table requires a small header, which can exceed the data savings on very
+  short inputs.
+- **Uniformly distributed or incompressible data**: when byte frequencies are
+  nearly uniform (or data is already compressed/encrypted), Huffman codes cannot
+  reduce the size and may add minor overhead for the code table.
+
+## Algorithm Comparison
+
+Different algorithms suit different data characteristics. Neither algorithm
+consistently produces smaller output across all inputs: RLE performs best on
+long runs of identical bytes, while Huffman performs best when symbol
+frequencies are skewed across the input.
+
+The following table shows compressed sizes measured across representative inputs:
+
+| Input | Original Size | RLE Size | Huffman Size |
+| --- | ---: | ---: | ---: |
+| Long single-symbol run (`'A'` x 10,000) | 10,000 bytes | 154 bytes | 11 bytes |
+| English text sample | 1,000 bytes | 1,008 bytes | 636 bytes |
+| Uniformly random bytes | 10,000 bytes | 10,079 bytes | 10,516 bytes |
+| Tiny input (`"test"`) | 4 bytes | 5 bytes | 17 bytes |
+
 ## Choosing an Algorithm
 
-The CLI currently supports the default algorithm only:
+The CLI supports selecting an algorithm via `--algorithm` / `-a` (defaults to `rle`):
 
 ```text
 mycompress compress input -a rle
+mycompress compress input -a huffman
 ```
 
 The algorithm registry is extensible for library users. Custom algorithms

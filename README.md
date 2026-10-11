@@ -2,8 +2,8 @@
 
 MyCompress is a cross-platform command-line tool for compressing files and
 directories into `.mcz` archives and extracting them again. It is written in
-Rust and currently includes one compression algorithm: run-length encoding
-(RLE).
+Rust and includes built-in compression algorithms: run-length encoding
+(RLE) and canonical Huffman coding.
 
 ## Requirements
 
@@ -86,8 +86,8 @@ mycompress compress <INPUT> [-o|--output <ARCHIVE>] [-a|--algorithm <NAME>] [-f|
 - `<INPUT>` is a file or directory.
 - `-o, --output` selects the destination archive. The default is
 	`<INPUT>.mcz`.
-- `-a, --algorithm` selects the compression algorithm. The default and only
-	currently available algorithm is `rle`.
+- `-a, --algorithm` selects the compression algorithm: `rle` (default) or
+	`huffman`.
 - `-f, --force` overwrites an existing output archive.
 
 If the output archive is inside the input directory, MyCompress skips that
@@ -140,8 +140,9 @@ before it is written.
 ## Archive and Compression Details
 
 - Archives use the version 1 `.mcz` format with the `MCZ1` signature.
-- RLE is most useful for data containing repeated bytes. It may provide little
-	benefit for already-compressed or random data.
+- RLE is most useful for data containing repeated bytes. Huffman coding
+	provides general-purpose compression for data with non-uniform byte distributions.
+	Neither algorithm is well suited for already-compressed or random data.
 - Files, directories, relative paths, file sizes, modification times, and
 	permissions are stored in the archive where supported by the platform.
 - Archive paths are validated to prevent absolute paths, parent-directory

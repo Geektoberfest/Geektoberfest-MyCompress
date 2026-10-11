@@ -8,8 +8,10 @@
 //! Ids `1..1024` are reserved for built-in algorithms; third-party code may
 //! register algorithms with ids `>= 1024`.
 
+mod huffman;
 mod rle;
 
+pub use huffman::Huffman;
 pub use rle::Rle;
 
 use std::collections::HashMap;
@@ -26,6 +28,8 @@ pub const FIRST_CUSTOM_ID: u16 = 1024;
 pub enum AlgorithmId {
     /// Run-Length Encoding (format id 1).
     Rle,
+    /// Huffman coding (format id 2).
+    Huffman,
     /// A third-party algorithm registered at runtime.
     Custom(u16),
 }
@@ -35,15 +39,17 @@ impl AlgorithmId {
     pub const fn as_u16(self) -> u16 {
         match self {
             Self::Rle => 1,
+            Self::Huffman => 2,
             Self::Custom(id) => id,
         }
     }
 
     /// Resolves the ids defined by the `.mcz` format. Reserved-but-unimplemented
-    /// built-in ids (e.g. a future Huffman id) resolve to `None`.
+    /// built-in ids resolve to `None`.
     pub fn from_u16(id: u16) -> Option<Self> {
         match id {
             1 => Some(Self::Rle),
+            2 => Some(Self::Huffman),
             _ if id >= FIRST_CUSTOM_ID => Some(Self::Custom(id)),
             _ => None,
         }
@@ -54,6 +60,7 @@ impl fmt::Display for AlgorithmId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Rle => write!(f, "rle"),
+            Self::Huffman => write!(f, "huffman"),
             Self::Custom(id) => write!(f, "custom-{id}"),
         }
     }
@@ -95,12 +102,15 @@ impl Registry {
             .register(Arc::new(Rle))
             .expect("built-in algorithm ids are unique");
         registry
+            .register(Arc::new(Huffman))
+            .expect("built-in algorithm ids are unique");
+        registry
     }
 
     /// Registers an algorithm. Fails for reserved ids and duplicate ids.
     pub fn register(&mut self, algorithm: Arc<dyn CompressionAlgorithm>) -> Result<()> {
         match algorithm.id() {
-            AlgorithmId::Rle => {}
+            AlgorithmId::Rle | AlgorithmId::Huffman => {}
             AlgorithmId::Custom(id) if id >= FIRST_CUSTOM_ID => {}
             AlgorithmId::Custom(id) => return Err(Error::ReservedAlgorithmId(id)),
         }
@@ -158,12 +168,15 @@ mod tests {
     }
 
     #[test]
-    fn builtin_registry_contains_rle() {
+    fn builtin_registry_contains_builtins() {
         let registry = Registry::new();
         assert!(registry.get(1).is_some());
         assert!(registry.get_by_name("rle").is_some());
         assert!(registry.get_by_name("RLE").is_some());
-        assert_eq!(registry.names(), vec!["rle"]);
+        assert!(registry.get(2).is_some());
+        assert!(registry.get_by_name("huffman").is_some());
+        assert!(registry.get_by_name("HUFFMAN").is_some());
+        assert_eq!(registry.names(), vec!["huffman", "rle"]);
     }
 
     #[test]
@@ -180,5 +193,14 @@ mod tests {
             registry.register(Arc::new(Passthrough(1))),
             Err(Error::ReservedAlgorithmId(1))
         ));
+        assert!(matches!(
+            registry.register(Arc::new(Passthrough(2))),
+            Err(Error::ReservedAlgorithmId(2))
+        ));
+        assert!(matches!(
+            registry.register(Arc::new(Passthrough(500))),
+            Err(Error::ReservedAlgorithmId(500))
+        ));
+        assert!(registry.get(999).is_none());
     }
 }

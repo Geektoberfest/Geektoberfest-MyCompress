@@ -14,7 +14,12 @@ before extraction and verifies every file's decompressed size and CRC32.
 | 8 | 4 | Entry count (`u32`) |
 | 12 | 4 | Reserved, must be zero |
 
-The built-in RLE algorithm has ID `1`.
+Built-in algorithm IDs:
+- `1`: Run-Length Encoding (RLE)
+- `2`: Canonical Huffman coding
+
+IDs `1..1023` are reserved for built-in algorithms; IDs `>= 1024` are available
+for custom third-party algorithms.
 
 ## Entry
 
@@ -37,6 +42,34 @@ compressed data:
 Directory entries always have zero uncompressed size, compressed size, and
 CRC32. File data is compressed with the algorithm named by the header.
 
+## Huffman Compressed Data Format
+
+The version 1 archive layout is unchanged; the Huffman payload is self-contained
+within the entry's compressed data field. Multi-byte integers inside the Huffman
+stream are little-endian.
+
+- **Empty input**: Compresses to 0 bytes.
+- **Fixed Header (10 bytes)**:
+  - `0..8` (8 bytes): Uncompressed length in bytes (`u64`).
+  - `8..10` (2 bytes): Number of distinct symbols present (`u16`, range `1..=256`).
+- **Single-Symbol Stream (`symbol_count == 1`)**:
+  - `10` (1 byte): The symbol byte (`u8`).
+  - Total payload length is exactly 11 bytes. No code table or bitstream is stored.
+- **Multi-Symbol Stream (`symbol_count >= 2`)**:
+  - **Code Table (`symbol_count * 2` bytes)**: Starts at offset 10. Stores
+    `symbol_count` pairs of `(symbol: u8, code_length: u8)`. Code lengths must
+    be in range `1..=64`, symbols must be unique, and the lengths must satisfy
+    the Kraft-McMillan equality ($\sum 2^{-L} = 1$). Canonical codes are
+    assigned after sorting pairs by `(code_length, symbol)` ascending.
+  - **Bitstream**: Begins at offset `10 + symbol_count * 2` and extends to the end
+    of the entry's compressed data. Bits are packed MSB-first: for each symbol's
+    canonical code, the most significant bit is written first into bit 7 of the
+    byte, descending to bit 0. Unused bits in the final byte are padded with zero
+    bits.
+  - The reader stops decoding once the declared uncompressed length of symbols is
+    reached, ensuring zero-padding is never interpreted as a symbol. Trailing
+    bytes or non-zero padding bits are rejected as corrupt.
+
 ## Path and Size Rules
 
 Paths must be relative, non-empty, valid UTF-8, and must not contain `..`,
@@ -50,7 +83,10 @@ from causing unbounded allocation or extraction outside the destination.
 
 ## Compatibility
 
-The format version and algorithm ID are explicit so readers can reject
-archives they do not understand. Adding a new algorithm requires assigning a
-new ID and updating the registry; changing the record layout requires a new
-format version.
+- Existing RLE archives (algorithm ID `1`) remain completely unaffected and
+  extract byte-for-byte identically.
+- Archives created with Huffman coding (algorithm ID `2`) require a reader with
+  Huffman support in its registry. Older readers or custom registries that lack ID `2`
+  cleanly reject the archive with `Error::UnknownAlgorithm(2)`.
+- The version 1 archive header and entry record layout are unchanged. Adding
+  the Huffman algorithm required no changes to the container format.

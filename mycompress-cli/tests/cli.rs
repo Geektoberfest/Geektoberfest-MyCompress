@@ -199,6 +199,7 @@ fn help_and_version_work() {
     assert_success(&mycompress(&["--version"]), "--version");
     assert_success(&mycompress(&["--help"]), "--help");
     assert_success(&mycompress(&["compress", "--help"]), "compress --help");
+    assert_success(&mycompress(&["benchmark", "--help"]), "benchmark --help");
 }
 
 #[test]
@@ -249,5 +250,104 @@ fn huffman_compress_extract_list_info_round_trip() {
     assert_eq!(
         std::fs::read(out.join("docs/format.md")).unwrap(),
         b"# Format\nHuffman coding\n"
+    );
+}
+
+#[test]
+fn benchmark_temp_file_success_and_preserves_file() {
+    let dir = TempDir::new("benchmark-success");
+    let input = dir.path().join("sample.txt");
+    let initial_bytes = b"Hello, benchmark world! AAAAAABBBBBBCCCCCCDDDDDD";
+    std::fs::write(&input, initial_bytes).unwrap();
+
+    let output = mycompress(&["benchmark", input.to_str().unwrap()]);
+    assert_success(&output, "benchmark single file");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("rle"), "expected rle in stdout: {stdout}");
+    assert!(
+        stdout.contains(&format!("{} bytes", initial_bytes.len())),
+        "expected input size in stdout: {stdout}"
+    );
+    assert!(stdout.contains('%'), "expected ratio in stdout: {stdout}");
+    assert!(
+        stdout.contains("Timings are the median of 5 run(s) on this machine."),
+        "expected note line in stdout: {stdout}"
+    );
+
+    // The input file's bytes are unchanged.
+    assert_eq!(std::fs::read(&input).unwrap(), initial_bytes);
+
+    // The directory contains no new files (only the original input file).
+    let mut entries: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, vec![std::ffi::OsString::from("sample.txt")]);
+}
+
+#[test]
+fn benchmark_rejects_zero_iterations() {
+    let dir = TempDir::new("benchmark-zero-n");
+    let input = dir.path().join("sample.txt");
+    std::fs::write(&input, b"some content").unwrap();
+
+    let output = mycompress(&["benchmark", input.to_str().unwrap(), "-n", "0"]);
+    assert!(!output.status.success());
+}
+
+#[test]
+fn benchmark_rejects_directory_input() {
+    let dir = TempDir::new("benchmark-dir");
+    let sub = dir.path().join("subdir");
+    std::fs::create_dir(&sub).unwrap();
+
+    let output = mycompress(&["benchmark", sub.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("director"),
+        "expected directory error in stderr: {stderr}"
+    );
+}
+
+#[test]
+fn benchmark_rejects_missing_file() {
+    let dir = TempDir::new("benchmark-missing");
+    let missing = dir.path().join("nonexistent.txt");
+
+    let output = mycompress(&["benchmark", missing.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot read input"),
+        "expected cannot read input in stderr: {stderr}"
+    );
+}
+
+#[test]
+fn benchmark_multiple_files_reports_each_section() {
+    let dir = TempDir::new("benchmark-multiple");
+    let file1 = dir.path().join("first.txt");
+    let file2 = dir.path().join("second.txt");
+    std::fs::write(&file1, b"first file data AAAAA").unwrap();
+    std::fs::write(&file2, b"second file data BBBBB").unwrap();
+
+    let output = mycompress(&[
+        "benchmark",
+        file1.to_str().unwrap(),
+        file2.to_str().unwrap(),
+    ]);
+    assert_success(&output, "benchmark multiple files");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("first.txt"),
+        "expected first.txt in stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("second.txt"),
+        "expected second.txt in stdout: {stdout}"
     );
 }

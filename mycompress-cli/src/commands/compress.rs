@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use mycompress_core::files::{self, CompressOptions};
+use mycompress_core::files::{self, AlgorithmSelection, CompressOptions};
 use mycompress_core::{Error, Registry};
 
 use super::{ratio, thousands};
@@ -15,7 +15,7 @@ pub struct CompressArgs {
     #[arg(short, long)]
     output: Option<PathBuf>,
 
-    /// Compression algorithm
+    /// Compression algorithm (rle, huffman, auto)
     #[arg(short, long, default_value = "rle")]
     algorithm: String,
 
@@ -25,16 +25,20 @@ pub struct CompressArgs {
 }
 
 pub fn run(args: &CompressArgs, registry: &Registry) -> Result<(), Error> {
-    let algorithm = registry
-        .get_by_name(&args.algorithm)
-        .ok_or_else(|| {
+    let algorithm = if args.algorithm.eq_ignore_ascii_case("auto") {
+        AlgorithmSelection::Auto
+    } else {
+        let algo = registry.get_by_name(&args.algorithm).ok_or_else(|| {
+            let mut available = vec!["auto"];
+            available.extend(registry.names());
             Error::InvalidInput(format!(
                 "unknown algorithm '{}' (available: {})",
                 args.algorithm,
-                registry.names().join(", ")
+                available.join(", ")
             ))
-        })?
-        .id();
+        })?;
+        AlgorithmSelection::Explicit(algo.id())
+    };
 
     let output = args
         .output

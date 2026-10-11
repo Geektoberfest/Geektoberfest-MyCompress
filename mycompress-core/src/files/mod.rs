@@ -5,7 +5,9 @@ mod compress;
 mod extract;
 mod walk;
 
-pub use compress::{compress, CompressOptions, CompressStats};
+pub use compress::{
+    compress, AlgorithmSelection, CompressOptions, CompressStats, MAX_SAMPLE_BYTES,
+};
 pub use extract::{extract, extract_from_reader, ExtractOptions, ExtractStats};
 pub use walk::{collect_entries, SourceEntry};
 

@@ -23,7 +23,7 @@
 //!
 //! # fn main() -> mycompress_core::Result<()> {
 //! let registry = Registry::new();
-//! let options = CompressOptions { algorithm: AlgorithmId::Rle, force: false };
+//! let options = CompressOptions::explicit(AlgorithmId::Rle, false);
 //! files::compress(
 //!     std::path::Path::new("docs"),
 //!     std::path::Path::new("docs.mcz"),
@@ -41,6 +41,6 @@ pub mod error;
 pub mod files;
 pub mod paths;
 
-pub use algo::{AlgorithmId, CompressionAlgorithm, Registry};
+pub use algo::{select_algorithm, AlgorithmId, CompressionAlgorithm, Registry};
 pub use archive::{ArchiveReader, ArchiveWriter, EntryKind, EntryMetadata};
 pub use error::{Error, Result};

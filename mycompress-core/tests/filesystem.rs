@@ -12,10 +12,7 @@ use mycompress_core::files::{self, CompressOptions, ExtractOptions};
 use mycompress_core::{ArchiveReader, Error, Registry};
 
 fn options() -> CompressOptions {
-    CompressOptions {
-        algorithm: AlgorithmId::Rle,
-        force: false,
-    }
+    CompressOptions::explicit(AlgorithmId::Rle, false)
 }
 
 fn sample_tree(root: &Path) {
@@ -160,10 +157,7 @@ fn never_overwrites_existing_files() {
     files::compress(
         &input,
         &archive,
-        &CompressOptions {
-            algorithm: AlgorithmId::Rle,
-            force: true,
-        },
+        &CompressOptions::explicit(AlgorithmId::Rle, true),
         &Registry::new(),
     )
     .unwrap();
@@ -282,10 +276,7 @@ fn huffman_directory_round_trip() {
     fs::create_dir_all(&input).unwrap();
     sample_tree(&input);
 
-    let opts = CompressOptions {
-        algorithm: AlgorithmId::Huffman,
-        force: false,
-    };
+    let opts = CompressOptions::explicit(AlgorithmId::Huffman, false);
     files::compress(&input, &archive, &opts, &Registry::new()).unwrap();
 
     let reader = ArchiveReader::open(&archive, &Registry::new()).unwrap();
@@ -310,5 +301,201 @@ fn huffman_directory_round_trip() {
         let src = fs::read(input.join(rel)).unwrap();
         let dst = fs::read(output.join(rel)).unwrap();
         assert_eq!(src, dst, "content mismatch for '{rel}'");
+    }
+}
+
+fn lcg_bytes(seed: u64, len: usize) -> Vec<u8> {
+    let mut state = seed;
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        out.push((state >> 33) as u8);
+    }
+    out
+}
+
+#[test]
+fn auto_single_file_repetitive_round_trip() {
+    let dir = common::TempDir::new("auto-repetitive");
+    let input = dir.path().join("runs.bin");
+    let archive = dir.path().join("runs.mcz");
+    let output = dir.path().join("out");
+
+    let mut repetitive = Vec::new();
+    for _ in 0..50 {
+        repetitive.extend_from_slice(&[b'A'; 100]);
+        repetitive.extend_from_slice(&[b'B'; 100]);
+    }
+    fs::write(&input, &repetitive).unwrap();
+
+    let stats = files::compress(
+        &input,
+        &archive,
+        &CompressOptions::auto(false),
+        &Registry::new(),
+    )
+    .unwrap();
+    assert!(matches!(
+        stats.algorithm,
+        AlgorithmId::Rle | AlgorithmId::Huffman
+    ));
+
+    let reader = ArchiveReader::open(&archive, &Registry::new()).unwrap();
+    // Archive header must store concrete id 1 or 2
+    assert!(reader.algorithm_id() == 1 || reader.algorithm_id() == 2);
+
+    files::extract(
+        &archive,
+        &output,
+        &ExtractOptions::default(),
+        &Registry::new(),
+    )
+    .unwrap();
+    assert_eq!(fs::read(output.join("runs.bin")).unwrap(), repetitive);
+}
+
+#[test]
+fn auto_single_file_text_selects_huffman_and_round_trips() {
+    let dir = common::TempDir::new("auto-text");
+    let input = dir.path().join("document.txt");
+    let archive = dir.path().join("document.mcz");
+    let output = dir.path().join("out");
+
+    let sample = b"The quick brown fox jumps over the lazy dog. Huffman coding generates prefix codes suited for skewed byte distributions. ";
+    let mut text = Vec::new();
+    while text.len() < 2_000 {
+        text.extend_from_slice(sample);
+    }
+    fs::write(&input, &text).unwrap();
+
+    let stats = files::compress(
+        &input,
+        &archive,
+        &CompressOptions::auto(false),
+        &Registry::new(),
+    )
+    .unwrap();
+    assert_eq!(stats.algorithm, AlgorithmId::Huffman);
+
+    let reader = ArchiveReader::open(&archive, &Registry::new()).unwrap();
+    assert_eq!(reader.algorithm_id(), 2);
+    assert_eq!(reader.algorithm_name(), "huffman");
+
+    files::extract(
+        &archive,
+        &output,
+        &ExtractOptions::default(),
+        &Registry::new(),
+    )
+    .unwrap();
+    assert_eq!(fs::read(output.join("document.txt")).unwrap(), text);
+}
+
+#[test]
+fn auto_single_file_empty_falls_back_to_rle_and_round_trips() {
+    let dir = common::TempDir::new("auto-empty");
+    let input = dir.path().join("empty.txt");
+    let archive = dir.path().join("empty.mcz");
+    let output = dir.path().join("out");
+    fs::write(&input, b"").unwrap();
+
+    let stats = files::compress(
+        &input,
+        &archive,
+        &CompressOptions::auto(false),
+        &Registry::new(),
+    )
+    .unwrap();
+    assert_eq!(stats.algorithm, AlgorithmId::Rle);
+
+    let reader = ArchiveReader::open(&archive, &Registry::new()).unwrap();
+    assert_eq!(reader.algorithm_id(), 1);
+    assert_eq!(reader.algorithm_name(), "rle");
+
+    files::extract(
+        &archive,
+        &output,
+        &ExtractOptions::default(),
+        &Registry::new(),
+    )
+    .unwrap();
+    assert_eq!(fs::read(output.join("empty.txt")).unwrap(), b"");
+}
+
+#[test]
+fn auto_single_file_incompressible_falls_back_to_rle() {
+    let dir = common::TempDir::new("auto-incompressible");
+    let input = dir.path().join("random.bin");
+    let archive = dir.path().join("random.mcz");
+    let output = dir.path().join("out");
+
+    let rand_data = lcg_bytes(999, 10_000);
+    fs::write(&input, &rand_data).unwrap();
+
+    let stats = files::compress(
+        &input,
+        &archive,
+        &CompressOptions::auto(false),
+        &Registry::new(),
+    )
+    .unwrap();
+    assert_eq!(stats.algorithm, AlgorithmId::Rle);
+
+    let reader = ArchiveReader::open(&archive, &Registry::new()).unwrap();
+    assert_eq!(reader.algorithm_id(), 1);
+
+    files::extract(
+        &archive,
+        &output,
+        &ExtractOptions::default(),
+        &Registry::new(),
+    )
+    .unwrap();
+    assert_eq!(fs::read(output.join("random.bin")).unwrap(), rand_data);
+}
+
+#[test]
+fn auto_directory_round_trip_preserves_files_and_structure() {
+    let dir = common::TempDir::new("auto-dir-roundtrip");
+    let input = dir.path().join("input");
+    let archive = dir.path().join("archive.mcz");
+    let output = dir.path().join("out");
+    fs::create_dir_all(&input).unwrap();
+    sample_tree(&input);
+
+    let stats = files::compress(
+        &input,
+        &archive,
+        &CompressOptions::auto(false),
+        &Registry::new(),
+    )
+    .unwrap();
+    assert!(matches!(
+        stats.algorithm,
+        AlgorithmId::Rle | AlgorithmId::Huffman
+    ));
+
+    let reader = ArchiveReader::open(&archive, &Registry::new()).unwrap();
+    assert!(reader.algorithm_id() == 1 || reader.algorithm_id() == 2);
+
+    files::extract(
+        &archive,
+        &output,
+        &ExtractOptions::default(),
+        &Registry::new(),
+    )
+    .unwrap();
+
+    let mut expected = Vec::new();
+    collect_tree(&input, "", &mut expected);
+    let mut actual = Vec::new();
+    collect_tree(&output, "", &mut actual);
+    assert_eq!(expected, actual);
+    for rel in &expected {
+        assert_eq!(
+            fs::read(input.join(rel)).unwrap(),
+            fs::read(output.join(rel)).unwrap(),
+            "content mismatch: {rel}"
+        );
     }
 }

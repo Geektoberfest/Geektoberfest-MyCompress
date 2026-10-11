@@ -251,3 +251,85 @@ fn huffman_compress_extract_list_info_round_trip() {
         b"# Format\nHuffman coding\n"
     );
 }
+
+#[test]
+fn auto_compress_text_selects_huffman_and_extracts() {
+    let dir = TempDir::new("cli-auto-text");
+    let input = dir.path().join("input");
+    std::fs::create_dir_all(&input).unwrap();
+
+    let sample = b"The quick brown fox jumps over the lazy dog. Canonical Huffman coding is effective for text with varied frequencies. ";
+    let mut text = Vec::new();
+    while text.len() < 2_000 {
+        text.extend_from_slice(sample);
+    }
+    std::fs::write(input.join("essay.txt"), &text).unwrap();
+
+    let archive = dir.path().join("auto.mcz");
+    let out = dir.path().join("out");
+
+    let output = mycompress(&[
+        "compress",
+        input.to_str().unwrap(),
+        "-o",
+        archive.to_str().unwrap(),
+        "-a",
+        "auto",
+    ]);
+    assert_success(&output, "compress with -a auto");
+
+    let output = mycompress(&["info", archive.to_str().unwrap()]);
+    assert_success(&output, "info on auto archive");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("huffman"),
+        "expected huffman in info: {stdout}"
+    );
+    assert!(stdout.contains("id 2"), "expected id 2 in info: {stdout}");
+
+    let output = mycompress(&[
+        "extract",
+        archive.to_str().unwrap(),
+        "-d",
+        out.to_str().unwrap(),
+    ]);
+    assert_success(&output, "extract auto archive");
+    assert_eq!(std::fs::read(out.join("essay.txt")).unwrap(), text);
+}
+
+#[test]
+fn explicit_algorithms_override_auto() {
+    let dir = TempDir::new("cli-explicit");
+    let input = dir.path().join("file.txt");
+    std::fs::write(
+        &input,
+        b"some simple content for testing explicit algorithm flags",
+    )
+    .unwrap();
+
+    let archive_rle = dir.path().join("rle.mcz");
+    let output = mycompress(&[
+        "compress",
+        input.to_str().unwrap(),
+        "-o",
+        archive_rle.to_str().unwrap(),
+        "--algorithm",
+        "rle",
+    ]);
+    assert_success(&output, "explicit rle");
+    let info_rle = mycompress(&["info", archive_rle.to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&info_rle.stdout).contains("rle"));
+
+    let archive_huffman = dir.path().join("huffman.mcz");
+    let output = mycompress(&[
+        "compress",
+        input.to_str().unwrap(),
+        "-o",
+        archive_huffman.to_str().unwrap(),
+        "--algorithm",
+        "huffman",
+    ]);
+    assert_success(&output, "explicit huffman");
+    let info_huff = mycompress(&["info", archive_huffman.to_str().unwrap()]);
+    assert!(String::from_utf8_lossy(&info_huff.stdout).contains("huffman"));
+}

@@ -143,6 +143,67 @@ impl Registry {
         names.sort_unstable();
         names
     }
+
+    /// All registered algorithms, sorted deterministically by algorithm ID.
+    pub fn all(&self) -> Vec<Arc<dyn CompressionAlgorithm>> {
+        let mut algos: Vec<_> = self.algorithms.values().cloned().collect();
+        algos.sort_by_key(|a| a.id());
+        algos
+    }
+
+    /// Evaluates registered algorithms on a sample of input data and selects
+    /// the algorithm that produces the smallest compressed output.
+    ///
+    /// See [`select_algorithm`] for strategy and tie-breaking details.
+    pub fn select_algorithm(&self, sample: &[u8]) -> AlgorithmId {
+        select_algorithm(sample, self)
+    }
+}
+
+/// Evaluates registered algorithms on a sample of input data and selects
+/// the algorithm that produces the smallest compressed output.
+///
+/// # Selection Strategy
+///
+/// 1. If `sample` is empty, the fallback algorithm is returned (preferring [`AlgorithmId::Rle`]).
+/// 2. Each registered algorithm in `registry` is evaluated by calling its
+///    [`compress`](CompressionAlgorithm::compress) method on `sample`.
+/// 3. Candidates that return an error during trial compression or whose compressed
+///    output is not strictly smaller than `sample.len()` are disqualified.
+/// 4. Among valid candidates, the algorithm with the smallest compressed length wins.
+/// 5. Ties are resolved deterministically by choosing the candidate with the lowest
+///    [`AlgorithmId`] (preferring RLE over Huffman for built-in algorithms).
+/// 6. If no candidate reduces the sample (such as on incompressible or pseudo-random data,
+///    or when all candidates error), the fallback algorithm ([`AlgorithmId::Rle`] if present,
+///    or the first available registered algorithm) is returned.
+pub fn select_algorithm(sample: &[u8], registry: &Registry) -> AlgorithmId {
+    let mut candidates = registry.all();
+    candidates.sort_by_key(|a| a.id());
+
+    let fallback = candidates
+        .iter()
+        .map(|a| a.id())
+        .find(|&id| id == AlgorithmId::Rle)
+        .or_else(|| candidates.first().map(|a| a.id()))
+        .unwrap_or(AlgorithmId::Rle);
+
+    if sample.is_empty() {
+        return fallback;
+    }
+
+    let mut best_id = None;
+    let mut best_size = usize::MAX;
+
+    for algo in candidates {
+        if let Ok(compressed) = algo.compress(sample) {
+            if compressed.len() < sample.len() && compressed.len() < best_size {
+                best_size = compressed.len();
+                best_id = Some(algo.id());
+            }
+        }
+    }
+
+    best_id.unwrap_or(fallback)
 }
 
 #[cfg(test)]
@@ -164,6 +225,66 @@ mod tests {
         }
         fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
             Ok(data.to_vec())
+        }
+    }
+
+    /// A mock algorithm that shrinks data to a fixed length or expands.
+    struct MockShrink(u16, usize);
+
+    impl CompressionAlgorithm for MockShrink {
+        fn id(&self) -> AlgorithmId {
+            AlgorithmId::Custom(self.0)
+        }
+        fn name(&self) -> &'static str {
+            "mock-shrink"
+        }
+        fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
+            if self.1 < data.len() {
+                Ok(vec![0u8; self.1])
+            } else {
+                Ok(vec![0u8; data.len() + 10])
+            }
+        }
+        fn decompress(&self, _data: &[u8]) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A mock algorithm that always expands data.
+    struct MockExpand(u16);
+
+    impl CompressionAlgorithm for MockExpand {
+        fn id(&self) -> AlgorithmId {
+            AlgorithmId::Custom(self.0)
+        }
+        fn name(&self) -> &'static str {
+            "mock-expand"
+        }
+        fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
+            let mut out = data.to_vec();
+            out.push(0);
+            Ok(out)
+        }
+        fn decompress(&self, _data: &[u8]) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A mock algorithm that always fails during compression.
+    struct MockError(u16);
+
+    impl CompressionAlgorithm for MockError {
+        fn id(&self) -> AlgorithmId {
+            AlgorithmId::Custom(self.0)
+        }
+        fn name(&self) -> &'static str {
+            "mock-error"
+        }
+        fn compress(&self, _data: &[u8]) -> Result<Vec<u8>> {
+            Err(Error::CorruptArchive("compression failed".to_string()))
+        }
+        fn decompress(&self, _data: &[u8]) -> Result<Vec<u8>> {
+            Ok(Vec::new())
         }
     }
 
@@ -202,5 +323,102 @@ mod tests {
             Err(Error::ReservedAlgorithmId(500))
         ));
         assert!(registry.get(999).is_none());
+    }
+
+    #[test]
+    fn select_algorithm_empty_sample_returns_fallback() {
+        let registry = Registry::new();
+        assert_eq!(select_algorithm(&[], &registry), AlgorithmId::Rle);
+        assert_eq!(registry.select_algorithm(&[]), AlgorithmId::Rle);
+    }
+
+    #[test]
+    fn select_algorithm_text_prefers_huffman() {
+        let registry = Registry::new();
+        let sample = b"The quick brown fox jumps over the lazy dog. Huffman coding produces optimal prefix codes for known symbol frequencies, whereas run-length encoding excels on consecutive repetitions. ";
+        let mut text = Vec::new();
+        while text.len() < 1_000 {
+            text.extend_from_slice(sample);
+        }
+        text.truncate(1_000);
+        let chosen = select_algorithm(&text, &registry);
+        assert_eq!(chosen, AlgorithmId::Huffman);
+    }
+
+    #[test]
+    fn select_algorithm_repetitive_data_selects_compressor() {
+        let registry = Registry::new();
+        // Alternating runs of repeated bytes (excels with RLE)
+        let mut repetitive = Vec::new();
+        for _ in 0..10 {
+            repetitive.extend_from_slice(&[b'A'; 50]);
+            repetitive.extend_from_slice(&[b'B'; 50]);
+        }
+        let chosen = select_algorithm(&repetitive, &registry);
+        // Either RLE or Huffman compresses this well, and select_algorithm picks a compressor
+        assert!(matches!(chosen, AlgorithmId::Rle | AlgorithmId::Huffman));
+    }
+
+    #[test]
+    fn select_algorithm_incompressible_falls_back_to_rle() {
+        let registry = Registry::new();
+        // High entropy sequence with no repeated bytes and uniform distribution.
+        let mut random_like = Vec::with_capacity(256);
+        for b in 0u8..=255 {
+            random_like.push(b);
+        }
+        let chosen = select_algorithm(&random_like, &registry);
+        assert_eq!(chosen, AlgorithmId::Rle);
+    }
+
+    #[test]
+    fn select_algorithm_tie_breaking_favors_lower_id() {
+        let mut registry = Registry::default();
+        // Register two mock algorithms that produce identical output size (10 bytes).
+        registry.register(Arc::new(MockShrink(1050, 10))).unwrap();
+        registry.register(Arc::new(MockShrink(1040, 10))).unwrap();
+
+        let sample = vec![1u8; 100];
+        let chosen = select_algorithm(&sample, &registry);
+        // ID 1040 is lower than 1050, so it must win deterministically.
+        assert_eq!(chosen, AlgorithmId::Custom(1040));
+    }
+
+    #[test]
+    fn select_algorithm_ignores_algorithms_that_expand() {
+        let mut registry = Registry::default();
+        // Register an expanding algorithm with lower ID (2000)
+        // and a shrinking algorithm with higher ID (2001).
+        registry.register(Arc::new(MockExpand(2000))).unwrap();
+        registry.register(Arc::new(MockShrink(2001, 10))).unwrap();
+
+        let sample = vec![0u8; 100];
+        let chosen = select_algorithm(&sample, &registry);
+        // MockExpand(2000) has lower ID but expanded, so MockShrink(2001) must win.
+        assert_eq!(chosen, AlgorithmId::Custom(2001));
+    }
+
+    #[test]
+    fn select_algorithm_disqualifies_algorithms_that_error() {
+        let mut registry = Registry::default();
+        // MockError has lower ID (2000); MockShrink has higher ID (2001).
+        registry.register(Arc::new(MockError(2000))).unwrap();
+        registry.register(Arc::new(MockShrink(2001, 10))).unwrap();
+
+        let sample = vec![0u8; 100];
+        let chosen = select_algorithm(&sample, &registry);
+        assert_eq!(chosen, AlgorithmId::Custom(2001));
+    }
+
+    #[test]
+    fn select_algorithm_fallback_when_no_rle_or_all_error() {
+        let mut registry = Registry::default();
+        registry.register(Arc::new(MockError(2000))).unwrap();
+        registry.register(Arc::new(MockError(2001))).unwrap();
+
+        let sample = vec![0u8; 100];
+        // When all algorithms error and there is no RLE, fallback is the first registered algorithm.
+        let chosen = select_algorithm(&sample, &registry);
+        assert_eq!(chosen, AlgorithmId::Custom(2000));
     }
 }

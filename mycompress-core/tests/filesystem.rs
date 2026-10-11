@@ -272,3 +272,43 @@ fn modification_times_are_preserved() {
         1_600_000_000
     );
 }
+
+#[test]
+fn huffman_directory_round_trip() {
+    let dir = common::TempDir::new("huffman-dir-roundtrip");
+    let input = dir.path().join("input");
+    let archive = dir.path().join("archive.mcz");
+    let output = dir.path().join("out");
+    fs::create_dir_all(&input).unwrap();
+    sample_tree(&input);
+
+    let opts = CompressOptions {
+        algorithm: AlgorithmId::Huffman,
+        force: false,
+    };
+    files::compress(&input, &archive, &opts, &Registry::new()).unwrap();
+
+    let reader = ArchiveReader::open(&archive, &Registry::new()).unwrap();
+    assert_eq!(reader.algorithm_id(), 2);
+    assert_eq!(reader.algorithm_name(), "huffman");
+
+    files::extract(
+        &archive,
+        &output,
+        &ExtractOptions::default(),
+        &Registry::new(),
+    )
+    .unwrap();
+
+    let mut original = Vec::new();
+    let mut restored = Vec::new();
+    collect_tree(&input, "", &mut original);
+    collect_tree(&output, "", &mut restored);
+    assert_eq!(original, restored);
+
+    for rel in &original {
+        let src = fs::read(input.join(rel)).unwrap();
+        let dst = fs::read(output.join(rel)).unwrap();
+        assert_eq!(src, dst, "content mismatch for '{rel}'");
+    }
+}

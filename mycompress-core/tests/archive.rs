@@ -191,3 +191,60 @@ fn size_mismatch_is_reported() {
         })
     ));
 }
+
+fn write_huffman_archive(files: &[(&str, &[u8])], dirs: &[&str]) -> Vec<u8> {
+    let registry = Registry::new();
+    let algorithm = registry.get_by_name("huffman").unwrap();
+    let mut buffer = Vec::new();
+    {
+        let mut writer = ArchiveWriter::new(Cursor::new(&mut buffer), algorithm).unwrap();
+        for path in dirs {
+            writer.add_dir(path, 0o755, 0).unwrap();
+        }
+        for (path, data) in files {
+            writer.add_file(path, data, 0o644, 0).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+    buffer
+}
+
+#[test]
+fn huffman_archive_round_trips_multiple_entries() {
+    let files = [
+        ("hello.txt", &b"hello world"[..]),
+        ("empty.bin", &b""[..]),
+        ("single.bin", &b"zzzzzzzzzz"[..]),
+        ("binary.bin", &[0u8, 1, 2, 3, 4, 5, 255, 254][..]),
+        ("unicode/nihongo.txt", "こんにちは".as_bytes()),
+    ];
+    let dirs = ["unicode", "empty-dir"];
+    let bytes = write_huffman_archive(&files, &dirs);
+
+    let registry = Registry::new();
+    let mut reader = ArchiveReader::read_from(Cursor::new(bytes), &registry).unwrap();
+    assert_eq!(reader.format_version(), 1);
+    assert_eq!(reader.algorithm_id(), 2);
+    assert_eq!(reader.algorithm_name(), "huffman");
+    assert_eq!(reader.entry_count(), files.len() + dirs.len());
+
+    for (path, data) in &files {
+        let index = reader
+            .entries()
+            .iter()
+            .position(|e| e.path == *path)
+            .unwrap_or_else(|| panic!("missing entry '{path}'"));
+        assert_eq!(reader.entries()[index].kind, EntryKind::File);
+        assert_eq!(reader.entries()[index].uncompressed_size, data.len() as u64);
+        assert_eq!(reader.read_entry_data(index).unwrap(), *data);
+    }
+    for path in &dirs {
+        assert!(
+            reader
+                .entries()
+                .iter()
+                .any(|e| e.path == *path && e.kind == EntryKind::Directory),
+            "missing directory entry '{path}'"
+        );
+    }
+}

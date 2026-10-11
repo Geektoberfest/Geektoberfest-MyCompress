@@ -200,3 +200,54 @@ fn help_and_version_work() {
     assert_success(&mycompress(&["--help"]), "--help");
     assert_success(&mycompress(&["compress", "--help"]), "compress --help");
 }
+
+#[test]
+fn huffman_compress_extract_list_info_round_trip() {
+    let dir = TempDir::new("huffman-roundtrip");
+    let input = dir.path().join("input");
+    std::fs::create_dir_all(input.join("docs")).unwrap();
+    std::fs::write(input.join("docs/format.md"), b"# Format\nHuffman coding\n").unwrap();
+    std::fs::write(input.join("readme.txt"), b"MyCompress Huffman Test\n").unwrap();
+    let archive = dir.path().join("project.mcz");
+    let out = dir.path().join("out");
+
+    let output = mycompress(&[
+        "compress",
+        input.to_str().unwrap(),
+        "-o",
+        archive.to_str().unwrap(),
+        "-a",
+        "huffman",
+    ]);
+    assert_success(&output, "compress with huffman");
+    assert!(archive.exists());
+
+    let output = mycompress(&["info", archive.to_str().unwrap()]);
+    assert_success(&output, "info");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("huffman"), "info output: {stdout}");
+    assert!(stdout.contains("id 2"), "info output: {stdout}");
+    assert!(stdout.contains("version 1"), "info output: {stdout}");
+
+    let output = mycompress(&["list", archive.to_str().unwrap()]);
+    assert_success(&output, "list");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("readme.txt"), "list output: {stdout}");
+    assert!(stdout.contains("docs/format.md"), "list output: {stdout}");
+
+    let output = mycompress(&[
+        "extract",
+        archive.to_str().unwrap(),
+        "-d",
+        out.to_str().unwrap(),
+    ]);
+    assert_success(&output, "extract");
+    assert_eq!(
+        std::fs::read(out.join("readme.txt")).unwrap(),
+        b"MyCompress Huffman Test\n"
+    );
+    assert_eq!(
+        std::fs::read(out.join("docs/format.md")).unwrap(),
+        b"# Format\nHuffman coding\n"
+    );
+}

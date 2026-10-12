@@ -52,6 +52,7 @@ Available commands:
 | `extract` | Extract an archive into a directory |
 | `list` | List every file and directory in an archive |
 | `info` | Show archive format, algorithm, entry counts, sizes, and ratio |
+| `benchmark` | Compare registered compression algorithms on input files |
 
 Run `mycompress --help` or `mycompress <command> --help` for the generated
 command reference.
@@ -136,6 +137,47 @@ mycompress extract <ARCHIVE> [-d|--dest <DIRECTORY>] [-f|--force]
 Existing files are never overwritten by default. Existing directories may be
 reused. Every file is decompressed and checked for its expected size and CRC32
 before it is written.
+
+## Benchmark Algorithms
+
+Compare compression algorithms on one or more files:
+
+```sh
+mycompress benchmark ./report.txt
+```
+
+Compare across multiple files with a custom iteration count:
+
+```sh
+mycompress benchmark ./report.txt ./photo.raw -n 10
+```
+
+The complete syntax is:
+
+```text
+mycompress benchmark <FILE>... [-n|--iterations <N>]
+```
+
+- `<FILE>...` is one or more input files. Directories are unsupported.
+- `-n, --iterations` selects the number of runs per algorithm (default: `5`).
+	Must be greater than `0`.
+
+Benchmarking reads each file fully into memory, tests compression and
+decompression across all registered algorithms, and verifies that decompressed
+data exactly matches the original input. It only reads inputs and writes
+nothing; no output files are created.
+
+How to read the output:
+- **Ratio**: output size divided by input size; lower means smaller compressed output.
+- **Timings**: compression and decompression times are medians across all iterations on this machine.
+- Timings depend on hardware and data characteristics. Results are only indicative when running few iterations (`< 5`) or benchmarking small files (`< 64 KiB`).
+- Algorithms are listed alphabetically from the registry; they are not ranked or presented as "best" or "fastest".
+
+For realistic timings, run benchmarks using an optimized release build:
+
+```sh
+cargo run --release -p mycompress-cli -- benchmark ./report.txt
+```
 
 ## Archive and Compression Details
 

@@ -24,6 +24,7 @@ replacement.
 
 - `archive`: versioned format, reader, writer, entry metadata, and layout rules.
 - `algo`: compression algorithm trait, registry, and RLE implementation.
+- `bench`: benchmarking runner and duration calculations for registered algorithms.
 - `files`: filesystem walking, compression, and secure extraction.
 - `paths`: archive path parsing and traversal protection.
 - `crc32`: dependency-free CRC32 implementation for integrity checks.

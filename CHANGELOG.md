@@ -4,6 +4,7 @@ All notable changes to MyCompress are documented here.
 
 ## [Unreleased]
 
+- Added `benchmark` command to compare registered compression algorithms on input files (#9).
 - Continue improving documentation and release packaging.
 
 ## [0.1.0] - 2026-10-04

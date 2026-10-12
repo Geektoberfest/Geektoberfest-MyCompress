@@ -59,6 +59,8 @@ mycompress compress input -a rle
 mycompress compress input -a huffman
 ```
 
+You can also compare compression performance on your own files using the `benchmark` command: `mycompress benchmark <FILE>...`.
+
 The algorithm registry is extensible for library users. Custom algorithms
 must use IDs `1024` or greater. IDs below `1024` are reserved for built-in
 algorithms and future format-defined values.

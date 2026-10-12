@@ -12,6 +12,7 @@
 //! - [`files`]: filesystem helpers that turn files/directories into archives
 //!   and archives back into directories (with security validation).
 //! - [`paths`]: validation for paths stored inside archives.
+//! - [`bench`]: benchmarking utilities for comparing compression algorithms.
 //! - [`crc32`]: CRC32 (IEEE) checksums used for entry integrity.
 //! - [`error`]: the shared [`Error`] type.
 //!
@@ -36,6 +37,7 @@
 
 pub mod algo;
 pub mod archive;
+pub mod bench;
 pub mod crc32;
 pub mod error;
 pub mod files;

@@ -30,6 +30,7 @@ fn main() {
     let registry = Registry::new();
 
     let result = match cli.command {
+        Command::Benchmark(args) => commands::benchmark::run(&args, &registry),
         Command::Compress(args) => commands::compress::run(&args, &registry),
         Command::Extract(args) => commands::extract::run(&args, &registry),
         Command::List(args) => commands::list::run(&args, &registry),

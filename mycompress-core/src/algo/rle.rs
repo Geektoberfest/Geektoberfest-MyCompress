@@ -114,7 +114,10 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
                 ));
             }
             let run = (control - 0x80) as usize + MIN_RUN;
-            out.resize(out.len() + run, data[i]);
+            let new_len = out.len().checked_add(run).ok_or_else(|| {
+                Error::CorruptArchive("RLE decompressed size overflows usize".to_string())
+            })?;
+            out.resize(new_len, data[i]);
             i += 1;
         }
     }

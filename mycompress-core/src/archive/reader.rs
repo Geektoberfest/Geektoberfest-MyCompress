@@ -145,7 +145,14 @@ impl ArchiveReader {
                 )));
             }
 
-            offset += ENTRY_FIXED_SIZE as u64 + path_len as u64;
+            let record_and_path = (ENTRY_FIXED_SIZE as u64)
+                .checked_add(path_len as u64)
+                .ok_or_else(|| {
+                    Error::CorruptArchive("offset calculation overflowed".to_string())
+                })?;
+            offset = offset.checked_add(record_and_path).ok_or_else(|| {
+                Error::CorruptArchive("offset calculation overflowed".to_string())
+            })?;
             let remaining = file_len.saturating_sub(offset);
             if compressed_size > remaining {
                 return Err(Error::CorruptArchive(format!(
@@ -161,7 +168,9 @@ impl ArchiveReader {
             }
 
             data_offsets.push(offset);
-            offset += compressed_size;
+            offset = offset.checked_add(compressed_size).ok_or_else(|| {
+                Error::CorruptArchive("offset calculation overflowed".to_string())
+            })?;
             entries.push(EntryMetadata {
                 path,
                 kind,

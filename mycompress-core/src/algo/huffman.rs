@@ -351,12 +351,27 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
             current_code = 0;
         } else {
             let diff = len - prev_len;
-            current_code = (current_code + 1) << diff;
+            if diff >= 64 {
+                return Err(Error::CorruptArchive(
+                    "canonical code shift overflowed".to_string(),
+                ));
+            }
+            let next_code = current_code.checked_add(1).ok_or_else(|| {
+                Error::CorruptArchive("canonical code increment overflowed".to_string())
+            })?;
+            current_code = next_code.checked_shl(diff as u32).ok_or_else(|| {
+                Error::CorruptArchive("canonical code shift overflowed".to_string())
+            })?;
         }
         prev_len = len;
 
         let mut curr = 0usize;
         for bit_idx in (0..len).rev() {
+            if tree[curr].symbol.is_some() {
+                return Err(Error::CorruptArchive(
+                    "Huffman code prefix collides with existing symbol".to_string(),
+                ));
+            }
             let bit = (current_code >> bit_idx) & 1;
             if bit == 0 {
                 let next = match tree[curr].left {
@@ -395,6 +410,11 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
                 };
                 curr = next;
             }
+        }
+        if tree[curr].symbol.is_some() || tree[curr].left.is_some() || tree[curr].right.is_some() {
+            return Err(Error::CorruptArchive(
+                "duplicate or prefix-conflicting Huffman code in canonical tree".to_string(),
+            ));
         }
         tree[curr].symbol = Some(sym);
     }

@@ -50,40 +50,73 @@ pub fn extract(
     options: &ExtractOptions,
     registry: &Registry,
 ) -> Result<ExtractStats> {
+    extract_with_progress(archive, dest, options, registry, |_, _| {})
+}
+
+/// Extracts an archive while reporting progress after each completed entry.
+///
+/// The callback receives:
+/// - `completed_entries`: number of successfully processed archive entries;
+/// - `completed_bytes`: total bytes written from files so far.
+///
+/// The callback does not affect the extraction result.
+pub fn extract_with_progress<F>(
+    archive: &Path,
+    dest: &Path,
+    options: &ExtractOptions,
+    registry: &Registry,
+    on_progress: F,
+) -> Result<ExtractStats>
+where
+    F: FnMut(u64, u64),
+{
     let mut reader = ArchiveReader::open(archive, registry)?;
-    extract_from_reader(&mut reader, dest, options)
+    extract_from_reader_with_progress(&mut reader, dest, options, on_progress)
 }
 
 /// Extracts every entry of an already-opened archive into `dest`.
 ///
 /// Security guarantees:
 ///
-/// - entry paths were validated when the archive was opened and are
-///   re-validated here (defense in depth): no `..`, no absolute paths, no
-///   drive letters, no reserved device names — extraction can never write
-///   outside `dest`;
-/// - files are created with `create_new`, so an existing file is never
-///   silently overwritten unless `options.force` is set;
-/// - every entry is verified (decompressed size + CRC32) before it is
+/// - entry paths are re-validated: no `..`, absolute paths, drive letters, or
+///   reserved device names;
+/// - files are created with `create_new`, so existing files are not silently
+///   overwritten unless `options.force` is set;
+/// - every file entry is verified (decompressed size and CRC32) before it is
 ///   written to disk;
 /// - setuid/setgid/sticky permission bits are never restored.
 ///
-/// Existing directories are reused; existing files are never touched without
-/// `force`. Modification time and permissions are restored on a best-effort
-/// basis for files (directory metadata is not restored yet).
+/// Existing directories are reused. Modification times and permissions are
+/// restored on a best-effort basis for files.
 pub fn extract_from_reader(
     reader: &mut ArchiveReader,
     dest: &Path,
     options: &ExtractOptions,
 ) -> Result<ExtractStats> {
+    extract_from_reader_with_progress(reader, dest, options, |_, _| {})
+}
+
+/// Extracts entries while reporting progress after each successfully handled
+/// entry.
+pub fn extract_from_reader_with_progress<F>(
+    reader: &mut ArchiveReader,
+    dest: &Path,
+    options: &ExtractOptions,
+    mut on_progress: F,
+) -> Result<ExtractStats>
+where
+    F: FnMut(u64, u64),
+{
     prepare_destination(dest)?;
 
     let mut stats = ExtractStats::default();
     let metadata: Vec<_> = reader.entries().to_vec();
+
     for (index, entry) in metadata.iter().enumerate() {
-        // Re-validate even though the reader already did: cheap and safe.
+        // Re-validate even though the reader already did: defense in depth.
         let relative = paths::parse_archive_path(&entry.path)?;
         let target = dest.join(&relative);
+
         debug_assert!(
             target.starts_with(dest),
             "validated paths can never escape the destination"
@@ -97,19 +130,23 @@ pub fn extract_from_reader(
                         target.display()
                     )));
                 }
+
                 if !target.exists() {
                     fs::create_dir_all(&target)
                         .map_err(|e| file_op("create directory", &target, e))?;
                     stats.dirs_created += 1;
                 }
             }
+
             EntryKind::File => {
-                // Decompress + verify (size and CRC32) before touching disk.
+                // Decompress and verify size + CRC32 before touching disk.
                 let data = reader.read_entry_data(index)?;
+
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent)
                         .map_err(|e| file_op("create directory", parent, e))?;
                 }
+
                 let mut file = if options.force {
                     OpenOptions::new()
                         .write(true)
@@ -127,6 +164,7 @@ pub fn extract_from_reader(
                     ErrorKind::AlreadyExists => Error::OutputExists(target.clone()),
                     _ => file_op("write", &target, e),
                 })?;
+
                 file.write_all(&data)
                     .map_err(|e| file_op("write", &target, e))?;
                 file.flush().map_err(|e| file_op("write", &target, e))?;
@@ -138,22 +176,29 @@ pub fn extract_from_reader(
                 if entry.mtime != 0 {
                     restore_mtime(&target, entry.mtime);
                 }
+
                 if entry.mode != 0 {
                     restore_mode(&target, entry.mode);
                 }
             }
         }
+
+        // Report progress only after the entry has been processed successfully.
+        on_progress((index + 1) as u64, stats.bytes_written);
     }
+
     Ok(stats)
 }
 
 fn prepare_destination(dest: &Path) -> Result<()> {
     match fs::metadata(dest) {
         Ok(metadata) if metadata.is_dir() => Ok(()),
+
         Ok(_) => Err(Error::InvalidInput(format!(
             "destination '{}' exists and is not a directory",
             dest.display()
         ))),
+
         Err(_) => fs::create_dir_all(dest).map_err(|e| {
             Error::InvalidInput(format!(
                 "cannot create destination '{}': {e}",
@@ -166,8 +211,9 @@ fn prepare_destination(dest: &Path) -> Result<()> {
 /// Best-effort restoration of a file's modification time.
 fn restore_mtime(path: &Path, secs: u64) {
     let Some(time) = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs)) else {
-        return; // Implausible timestamp; ignore.
+        return;
     };
+
     if let Ok(file) = OpenOptions::new().write(true).open(path) {
         let _ = file.set_modified(time);
     }
@@ -176,12 +222,14 @@ fn restore_mtime(path: &Path, secs: u64) {
 #[cfg(unix)]
 fn restore_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
-    // Drop setuid/setgid/sticky bits: an archive must never be able to
-    // grant elevated permissions during extraction.
+
+    // Never restore setuid, setgid, or sticky bits from an archive.
     let mode = mode & 0o777;
+
     if mode == 0 {
         return;
     }
+
     if let Ok(metadata) = fs::metadata(path) {
         let mut permissions = metadata.permissions();
         permissions.set_mode(mode);

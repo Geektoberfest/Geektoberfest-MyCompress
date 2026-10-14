@@ -5,6 +5,7 @@ pub mod compress;
 pub mod extract;
 pub mod info;
 pub mod list;
+mod progress;
 
 use clap::Subcommand;
 

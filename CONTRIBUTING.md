@@ -28,6 +28,13 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
+The test suite includes:
+- Unit and integration tests for CLI, archive reader/writer, filesystem, and security.
+- Property-based tests via `proptest` (`cargo test -p mycompress-core --test property`).
+- Malformed and adversarial input tests (`cargo test -p mycompress-core --test malformed`).
+- Bounded fuzz smoke tests (`cargo test -p mycompress-core --test fuzz_smoke`).
+- Dedicated `cargo-fuzz` targets in `fuzz/` (`fuzz_archive` and `fuzz_decompress`).
+
 Add or update focused tests when changing archive behavior, filesystem
 handling, path validation, or compression algorithms. Do not weaken security
 checks to make a test pass.

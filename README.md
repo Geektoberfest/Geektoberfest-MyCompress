@@ -168,17 +168,86 @@ mycompress list ./backup.mcz
 mycompress extract ./backup.mcz --dest ./restored --force
 ```
 
-## Development
+## Development and Testing
 
-Run all tests after making changes:
+Run the complete automated test suite (unit tests, integration tests, property-based tests, malformed-input tests, and fuzz smoke tests):
 
 ```sh
 cargo test --workspace
 ```
 
+### Property-Based Testing
+
+Property-based tests use [`proptest`](https://crates.io/crates/proptest) to verify that `decompress(compress(data)) == data` holds across all supported algorithms (`rle` and `huffman`) and full in-memory `.mcz` archives.
+
+To run only property-based tests:
+
+```sh
+cargo test -p mycompress-core --test property
+```
+
+The property test suite generates bounded inputs across:
+- Empty and single-byte sequences
+- Long repeated byte runs (up to 20,000 bytes)
+- Alternating two-byte patterns
+- Small repeating chunks (2..8 bytes repeated)
+- Shuffled sequences covering all 256 byte values
+- Format and algorithm boundary lengths (0, 1, 2, 3, 127..131, 255..257, 4096, 8192)
+- Multi-file archives with complex nested paths
+
+Failed test cases are automatically minimized and persisted to `proptest-regressions/` for deterministic reproduction.
+
+### Malformed and Adversarial Archive Tests
+
+Adversarial tests ensure corrupt archives, hostile size metadata, invalid paths, and broken compression streams are rejected with controlled `Error` variants rather than panics or excessive allocations:
+
+```sh
+cargo test -p mycompress-core --test malformed
+```
+
+Scenarios covered include:
+- Empty inputs and truncated headers at every single byte offset (1..15)
+- Bad magic bytes and unsupported format versions/algorithm IDs
+- Non-zero reserved fields in archive headers and entry records
+- Truncated entries, truncated paths, and truncated compressed streams
+- Size mismatch attacks, integer overflow attacks, and sizes exceeding limits (> 1 TiB)
+- Directory entries carrying unexpected file data or non-zero checksums
+- Path traversal attacks (`..`, `a/../../b`), absolute paths, backslashes, NUL bytes, Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1..9`, `LPT1..9`), and overlong components
+- Corrupted CRC32 checksums and broken RLE/Huffman bitstreams
+
+### Fuzz Testing
+
+1. **Fast Bounded Smoke Test** (runs on stable Rust without additional tools):
+
+   ```sh
+   cargo test -p mycompress-core --test fuzz_smoke
+   ```
+
+   Exercises `ArchiveReader::read_from`, `Rle::decompress`, and `Huffman::decompress` against thousands of random, truncated, bit-flipped, and spliced byte sequences in under a second.
+
+2. **Dedicated Continuous Fuzzing (`cargo-fuzz`)**:
+
+   For long-running fuzzing campaigns with libFuzzer:
+
+   ```sh
+   # Install cargo-fuzz (requires nightly Rust)
+   cargo install cargo-fuzz
+
+   # Run archive parser fuzzer
+   cargo fuzz run fuzz_archive
+
+   # Run raw decompression fuzzer
+   cargo fuzz run fuzz_decompress
+   ```
+
+   To reproduce a saved crash artifact found by `cargo-fuzz`:
+   ```sh
+   cargo fuzz run fuzz_archive <path/to/crash-artifact>
+   ```
+
 Useful documentation:
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance
+- [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance and CI checks
 - [docs/architecture.md](docs/architecture.md) for the project structure
 - [docs/format.md](docs/format.md) for the `.mcz` file format
 - [docs/algorithms.md](docs/algorithms.md) for compression algorithms

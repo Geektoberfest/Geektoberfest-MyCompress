@@ -9,3 +9,6 @@ repository.workspace = true
 
 [dependencies]
 # Intentionally empty: the core library has no third-party dependencies.
+
+[dev-dependencies]
+proptest = "1.5"

@@ -4,7 +4,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::algo::{CompressionAlgorithm, Registry};
+use crate::algo::{CompressionAlgorithm, Registry, MAX_DECOMPRESSED_BYTES};
 use crate::archive::format::{
     ENTRY_FIXED_SIZE, FORMAT_VERSION, HEADER_SIZE, MAGIC, MAX_ENTRY_COUNT,
     MAX_ENTRY_UNCOMPRESSED_SIZE, MAX_PATH_LEN,
@@ -244,7 +244,21 @@ impl ArchiveReader {
                 metadata.path
             )));
         }
-        let mut compressed = vec![0u8; metadata.compressed_size as usize];
+        if metadata.uncompressed_size > MAX_DECOMPRESSED_BYTES {
+            return Err(Error::UnreasonableSize {
+                path: metadata.path.clone(),
+                size: metadata.uncompressed_size,
+            });
+        }
+        let compressed_len = metadata.compressed_size as usize;
+        let mut compressed = Vec::new();
+        compressed.try_reserve_exact(compressed_len).map_err(|_| {
+            Error::CorruptArchive(format!(
+                "entry '{}' is too large to read",
+                metadata.path
+            ))
+        })?;
+        compressed.resize(compressed_len, 0);
         self.reader
             .seek(SeekFrom::Start(self.data_offsets[index]))?;
         read_bytes(&mut self.reader, &mut compressed)?;

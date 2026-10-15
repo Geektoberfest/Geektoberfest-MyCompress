@@ -23,6 +23,10 @@ use crate::error::{Error, Result};
 /// Lowest id that third-party algorithms may claim.
 pub const FIRST_CUSTOM_ID: u16 = 1024;
 
+/// Hard cap on bytes a single decompress call may produce (64 MiB).
+/// Decoders must reject headers claiming more than this before allocating.
+pub const MAX_DECOMPRESSED_BYTES: u64 = 64 << 20;
+
 /// Identifies a compression algorithm inside a `.mcz` archive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AlgorithmId {

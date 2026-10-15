@@ -25,13 +25,13 @@ use std::collections::BinaryHeap;
 
 use crate::error::{Error, Result};
 
-use super::{AlgorithmId, CompressionAlgorithm};
+use super::{AlgorithmId, CompressionAlgorithm, MAX_DECOMPRESSED_BYTES};
 
 /// Maximum code length supported by the canonical bit reader/writer.
 const MAX_CODE_LEN: u8 = 64;
 
-/// Upper bound on single-symbol decompression in memory (1 GiB).
-const MAX_SINGLE_SYMBOL_DECOMPRESSED_SIZE: u64 = 1 << 30;
+/// Upper bound on single-symbol decompression in memory (64 MiB).
+const MAX_SINGLE_SYMBOL_DECOMPRESSED_SIZE: u64 = 64 << 20;
 
 /// The Huffman compression algorithm.
 #[derive(Debug, Default)]
@@ -421,7 +421,15 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
 
     let target_len = usize::try_from(uncompressed_len)
         .map_err(|_| Error::CorruptArchive("declared length overflows target usize".to_string()))?;
-    let mut out = Vec::with_capacity(target_len);
+    if target_len as u64 > MAX_DECOMPRESSED_BYTES {
+        return Err(Error::CorruptArchive(format!(
+            "declared length {uncompressed_len} exceeds limit {MAX_DECOMPRESSED_BYTES}"
+        )));
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(target_len).map_err(|_| {
+        Error::CorruptArchive("cannot allocate memory for decompression".to_string())
+    })?;
     let mut curr = 0usize;
     let mut finished_at = None;
 

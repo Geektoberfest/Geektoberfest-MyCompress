@@ -253,10 +253,7 @@ impl ArchiveReader {
         let compressed_len = metadata.compressed_size as usize;
         let mut compressed = Vec::new();
         compressed.try_reserve_exact(compressed_len).map_err(|_| {
-            Error::CorruptArchive(format!(
-                "entry '{}' is too large to read",
-                metadata.path
-            ))
+            Error::CorruptArchive(format!("entry '{}' is too large to read", metadata.path))
         })?;
         compressed.resize(compressed_len, 0);
         self.reader

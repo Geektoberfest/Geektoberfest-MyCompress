@@ -107,6 +107,9 @@ fn files_over_the_cap_fail_cleanly() {
             matches!(err, Error::UnreasonableSize { .. }),
             "expected UnreasonableSize, got: {err:?}"
         );
-        assert!(!archive.exists(), "failed compress must not leave an archive");
+        assert!(
+            !archive.exists(),
+            "failed compress must not leave an archive"
+        );
     }
 }

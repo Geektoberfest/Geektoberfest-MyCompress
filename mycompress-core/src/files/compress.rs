@@ -10,7 +10,7 @@ use crate::crc32::Crc32;
 use crate::error::{Error, Result};
 
 use super::file_op;
-use super::walk::{SourceEntry, collect_entries};
+use super::walk::{collect_entries, SourceEntry};
 
 /// Options for [`compress`].
 #[derive(Clone, Copy, Debug)]

@@ -17,7 +17,10 @@
 //! allocate.
 //!
 //! `decompress(compress(data)) == data` holds for every input, including the
-//! empty input (which compresses to the empty output). See also
+//! empty input (which compresses to the empty output). The stream is also
+//! chunk-concatenable: compressing pieces independently and concatenating the
+//! outputs still decodes to the concatenated input, so files can be encoded in
+//! fixed-size chunks without holding the whole file in memory. See also
 //! `docs/algorithms.md`.
 
 use crate::error::{Error, Result};

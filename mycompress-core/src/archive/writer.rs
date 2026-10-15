@@ -68,19 +68,45 @@ impl<W: Write + Seek> ArchiveWriter<W> {
 
     /// Adds a file entry. `data` is the uncompressed file contents.
     pub fn add_file(&mut self, path: &str, data: &[u8], mode: u32, mtime: u64) -> Result<()> {
+        let algorithm = Arc::clone(&self.algorithm);
+        let compressed = algorithm.compress(data)?;
+        self.add_file_precompressed(
+            path,
+            data.len() as u64,
+            &compressed,
+            mode,
+            mtime,
+            crc32(data),
+        )
+    }
+
+    /// Adds a file entry from already-compressed data.
+    ///
+    /// `compressed` must be the stored form of exactly `uncompressed_size`
+    /// bytes with checksum `crc32`. Streaming compress paths use this so the
+    /// uncompressed file is never fully materialized; the format on disk is
+    /// identical to [`add_file`](Self::add_file).
+    pub fn add_file_precompressed(
+        &mut self,
+        path: &str,
+        uncompressed_size: u64,
+        compressed: &[u8],
+        mode: u32,
+        mtime: u64,
+        crc32: u32,
+    ) -> Result<()> {
         self.check_new_path(path, EntryKind::File)?;
-        let compressed = self.algorithm.compress(data)?;
         let metadata = EntryMetadata {
             path: path.to_string(),
             kind: EntryKind::File,
             mode,
             mtime,
-            uncompressed_size: data.len() as u64,
+            uncompressed_size,
             compressed_size: compressed.len() as u64,
-            crc32: crc32(data),
+            crc32,
         };
         self.write_record(&metadata)?;
-        self.out.write_all(&compressed)?;
+        self.out.write_all(compressed)?;
         self.bump_entry_count()
     }
 

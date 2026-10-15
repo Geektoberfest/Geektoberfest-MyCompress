@@ -34,13 +34,8 @@ pub fn run(args: &ExtractArgs, registry: &Registry) -> Result<(), Error> {
         },
     );
 
-    let stats = match result {
-        Ok(stats) => {
-            progress.finish();
-            stats
-        }
-        Err(error) => return Err(error),
-    };
+    let stats = result?;
+    progress.finish();
 
     println!(
         "extracted {} file(s), {} dir(s) to {}",
@@ -49,5 +44,6 @@ pub fn run(args: &ExtractArgs, registry: &Registry) -> Result<(), Error> {
         args.dest.display()
     );
     println!("  {} bytes written", thousands(stats.bytes_written));
+
     Ok(())
 }

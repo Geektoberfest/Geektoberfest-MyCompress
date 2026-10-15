@@ -1,14 +1,16 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, ErrorKind};
+use std::io::{BufWriter, ErrorKind, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use crate::algo::{AlgorithmId, Registry};
+use crate::algo::{AlgorithmId, CompressionAlgorithm, Registry, MAX_DECOMPRESSED_BYTES};
 use crate::archive::writer::ArchiveWriter;
 use crate::archive::EntryKind;
+use crate::crc32::Crc32;
 use crate::error::{Error, Result};
 
 use super::file_op;
-use super::walk::collect_entries;
+use super::walk::{SourceEntry, collect_entries};
 
 /// Options for [`compress`].
 #[derive(Clone, Copy, Debug)]
@@ -35,6 +37,11 @@ pub struct CompressStats {
 /// Compresses `input` (a file or a directory tree) into a `.mcz` archive at
 /// `output`.
 ///
+/// Files using RLE are streamed in fixed-size chunks, so the uncompressed
+/// contents are never fully held in memory. Other algorithms need the whole
+/// input (Huffman builds a global frequency table), so those files are read
+/// with a hard size cap instead; see the limitations section below.
+///
 /// Guarantees:
 ///
 /// - the output archive is never overwritten unless `options.force` is set;
@@ -42,6 +49,14 @@ pub struct CompressStats {
 ///   output lives inside the input directory;
 /// - if compression fails midway, the partial archive is deleted so that no
 ///   broken archives are left behind.
+///
+/// # Limitations
+///
+/// The [`CompressionAlgorithm`] interface compresses whole slices, and Huffman
+/// codes depend on frequencies across the entire input, so Huffman (and custom)
+/// algorithms still buffer one file at a time, capped at
+/// [`MAX_DECOMPRESSED_BYTES`] (64 MiB) to fail cleanly instead of exhausting
+/// memory. Only RLE compresses incrementally.
 ///
 /// # Errors
 ///
@@ -139,6 +154,7 @@ fn write_archive(
         warnings,
         ..Default::default()
     };
+    let writer_algorithm = Arc::clone(&algorithm);
     let mut writer = ArchiveWriter::new(BufWriter::new(file), algorithm)?;
     for entry in &entries {
         match entry.kind {
@@ -147,15 +163,111 @@ fn write_archive(
                 stats.dir_count += 1;
             }
             EntryKind::File => {
-                let data =
-                    fs::read(&entry.fs_path).map_err(|e| file_op("read", &entry.fs_path, e))?;
-                writer.add_file(&entry.archive_path, &data, entry.mode, entry.mtime)?;
+                // Fail fast on files already known to exceed the per-entry cap.
+                if entry.size > MAX_DECOMPRESSED_BYTES {
+                    return Err(Error::UnreasonableSize {
+                        path: entry.archive_path.clone(),
+                        size: entry.size,
+                    });
+                }
+                let total = if options.algorithm == AlgorithmId::Rle {
+                    compress_rle_streamed(entry, &mut writer, &writer_algorithm)?
+                } else {
+                    compress_buffered(entry, &mut writer)?
+                };
                 stats.file_count += 1;
-                stats.total_uncompressed += data.len() as u64;
+                stats.total_uncompressed += total;
             }
         }
     }
     writer.finish()?;
     stats.archive_size = fs::metadata(output).map_or(0, |m| m.len());
     Ok(stats)
+}
+
+/// Fixed read size for streaming compression (64 KiB).
+const COMPRESS_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Streams one file through RLE chunk by chunk.
+///
+/// RLE blocks are self-delimiting, so encoding each chunk independently and
+/// concatenating the outputs still decodes to the original bytes (slightly
+/// less optimal across chunk edges only). The uncompressed file is never
+/// fully materialized: peak memory is one chunk plus the compressed output.
+fn compress_rle_streamed(
+    entry: &SourceEntry,
+    writer: &mut ArchiveWriter<BufWriter<File>>,
+    algorithm: &Arc<dyn CompressionAlgorithm>,
+) -> Result<u64> {
+    let mut source = File::open(&entry.fs_path).map_err(|e| file_op("read", &entry.fs_path, e))?;
+    let mut hasher = Crc32::new();
+    let mut compressed: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; COMPRESS_CHUNK_BYTES];
+    let mut total: u64 = 0;
+    loop {
+        let n = match source.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(file_op("read", &entry.fs_path, e)),
+        };
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        if total > MAX_DECOMPRESSED_BYTES {
+            return Err(Error::UnreasonableSize {
+                path: entry.archive_path.clone(),
+                size: total,
+            });
+        }
+        let chunk = &buf[..n];
+        hasher.update(chunk);
+        let part = algorithm.compress(chunk)?;
+        compressed.extend_from_slice(&part);
+    }
+    let crc = hasher.finalize();
+    writer.add_file_precompressed(
+        &entry.archive_path,
+        total,
+        &compressed,
+        entry.mode,
+        entry.mtime,
+        crc,
+    )?;
+    Ok(total)
+}
+
+/// Reads one file with a hard cap for algorithms that need the whole input.
+///
+/// Huffman builds a global frequency table, so it cannot encode incrementally
+/// through the current [`CompressionAlgorithm`] interface. The file is still
+/// read in chunks (CRC computed on the fly) so growth past the cap fails
+/// cleanly instead of exhausting memory.
+fn compress_buffered(
+    entry: &SourceEntry,
+    writer: &mut ArchiveWriter<BufWriter<File>>,
+) -> Result<u64> {
+    let mut source = File::open(&entry.fs_path).map_err(|e| file_op("read", &entry.fs_path, e))?;
+    let mut data: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; COMPRESS_CHUNK_BYTES];
+    loop {
+        let n = match source.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(file_op("read", &entry.fs_path, e)),
+        };
+        if n == 0 {
+            break;
+        }
+        if data.len() as u64 + n as u64 > MAX_DECOMPRESSED_BYTES {
+            return Err(Error::UnreasonableSize {
+                path: entry.archive_path.clone(),
+                size: data.len() as u64 + n as u64,
+            });
+        }
+        data.extend_from_slice(&buf[..n]);
+    }
+    let total = data.len() as u64;
+    writer.add_file(&entry.archive_path, &data, entry.mode, entry.mtime)?;
+    Ok(total)
 }

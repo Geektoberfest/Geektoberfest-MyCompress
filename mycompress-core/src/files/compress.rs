@@ -53,6 +53,26 @@ pub fn compress(
     options: &CompressOptions,
     registry: &Registry,
 ) -> Result<CompressStats> {
+    compress_with_progress(input, output, options, registry, |_, _| {})
+}
+
+/// Compresses an input while reporting progress after each completed entry.
+///
+/// The callback receives:
+/// - `completed_entries`: number of files and directories processed;
+/// - `completed_bytes`: total uncompressed bytes processed.
+///
+/// The callback does not affect the compression result.
+pub fn compress_with_progress<F>(
+    input: &Path,
+    output: &Path,
+    options: &CompressOptions,
+    registry: &Registry,
+    mut on_progress: F,
+) -> Result<CompressStats>
+where
+    F: FnMut(u64, u64),
+{
     validate_input(input)?;
 
     if same_path(input, output)? {
@@ -60,6 +80,7 @@ pub fn compress(
             "the output archive must be different from the input".to_string(),
         ));
     }
+
     if output.exists() && !options.force {
         return Err(Error::OutputExists(output.to_path_buf()));
     }
@@ -80,7 +101,7 @@ pub fn compress(
         _ => Error::Io(e),
     })?;
 
-    match write_archive(input, output, file, options, registry) {
+    match write_archive(input, output, file, options, registry, &mut on_progress) {
         Ok(stats) => Ok(stats),
         Err(error) => {
             // Never leave a half-written archive behind.
@@ -94,15 +115,19 @@ fn validate_input(input: &Path) -> Result<()> {
     let symlink = fs::symlink_metadata(input).map_err(|e| {
         Error::InvalidInput(format!("cannot read input '{}': {e}", input.display()))
     })?;
+
     if symlink.file_type().is_symlink() {
         return Err(Error::UnsupportedEntry(input.to_path_buf()));
     }
+
     let metadata = fs::metadata(input).map_err(|e| {
         Error::InvalidInput(format!("cannot read input '{}': {e}", input.display()))
     })?;
+
     if !metadata.is_dir() && !metadata.is_file() {
         return Err(Error::UnsupportedEntry(input.to_path_buf()));
     }
+
     Ok(())
 }
 
@@ -111,6 +136,7 @@ fn same_path(a: &Path, b: &Path) -> Result<bool> {
     if a == b {
         return Ok(true);
     }
+
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => Ok(a == b),
         // If either path does not exist yet, they cannot be the same file.
@@ -118,13 +144,17 @@ fn same_path(a: &Path, b: &Path) -> Result<bool> {
     }
 }
 
-fn write_archive(
+fn write_archive<F>(
     input: &Path,
     output: &Path,
     file: File,
     options: &CompressOptions,
     registry: &Registry,
-) -> Result<CompressStats> {
+    on_progress: &mut F,
+) -> Result<CompressStats>
+where
+    F: FnMut(u64, u64),
+{
     let algorithm = registry.get(options.algorithm.as_u16()).ok_or_else(|| {
         Error::InvalidInput(format!(
             "algorithm '{}' is not registered",
@@ -139,7 +169,9 @@ fn write_archive(
         warnings,
         ..Default::default()
     };
+
     let mut writer = ArchiveWriter::new(BufWriter::new(file), algorithm)?;
+
     for entry in &entries {
         match entry.kind {
             EntryKind::Directory => {
@@ -149,13 +181,22 @@ fn write_archive(
             EntryKind::File => {
                 let data =
                     fs::read(&entry.fs_path).map_err(|e| file_op("read", &entry.fs_path, e))?;
+
                 writer.add_file(&entry.archive_path, &data, entry.mode, entry.mtime)?;
+
                 stats.file_count += 1;
                 stats.total_uncompressed += data.len() as u64;
             }
         }
+
+        let completed_entries = u64::from(stats.file_count) + u64::from(stats.dir_count);
+
+        on_progress(completed_entries, stats.total_uncompressed);
     }
+
     writer.finish()?;
-    stats.archive_size = fs::metadata(output).map_or(0, |m| m.len());
+
+    stats.archive_size = fs::metadata(output).map_or(0, |metadata| metadata.len());
+
     Ok(stats)
 }

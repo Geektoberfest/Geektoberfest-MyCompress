@@ -5,8 +5,11 @@ mod compress;
 mod extract;
 mod walk;
 
-pub use compress::{compress, CompressOptions, CompressStats};
-pub use extract::{extract, extract_from_reader, ExtractOptions, ExtractStats};
+pub use compress::{compress, compress_with_progress, CompressOptions, CompressStats};
+pub use extract::{
+    extract, extract_from_reader, extract_from_reader_with_progress, extract_with_progress,
+    ExtractOptions, ExtractStats,
+};
 pub use walk::{collect_entries, SourceEntry};
 
 use std::path::Path;

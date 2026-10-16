@@ -4,7 +4,7 @@ use clap::Args;
 use mycompress_core::files::{self, CompressOptions};
 use mycompress_core::{Error, Registry};
 
-use super::{ratio, thousands};
+use super::{progress::Progress, ratio, thousands};
 
 #[derive(Args, Debug)]
 pub struct CompressArgs {
@@ -40,16 +40,32 @@ pub fn run(args: &CompressArgs, registry: &Registry) -> Result<(), Error> {
         .output
         .clone()
         .unwrap_or_else(|| default_output(&args.input));
+
     let options = CompressOptions {
         algorithm,
         force: args.force,
     };
 
-    let stats = files::compress(&args.input, &output, &options, registry)?;
+    let mut progress = Progress::new("Compressing", None, None);
+
+    let result = files::compress_with_progress(
+        &args.input,
+        &output,
+        &options,
+        registry,
+        |completed_entries, completed_bytes| {
+            progress.update(completed_entries, completed_bytes);
+        },
+    );
+
+    progress.finish();
+
+    let stats = result?;
 
     for warning in &stats.warnings {
         eprintln!("warning: {warning}");
     }
+
     println!("created {}", output.display());
     println!("  {} file(s), {} dir(s)", stats.file_count, stats.dir_count);
     println!(
@@ -58,6 +74,7 @@ pub fn run(args: &CompressArgs, registry: &Registry) -> Result<(), Error> {
         thousands(stats.archive_size),
         ratio(stats.archive_size, stats.total_uncompressed)
     );
+
     Ok(())
 }
 

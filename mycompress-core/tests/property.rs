@@ -101,6 +101,58 @@ fn arb_valid_path() -> impl Strategy<Value = String> {
     prop::collection::vec("[a-z0-9_]{1,12}", 1..=3).prop_map(|components| components.join("/"))
 }
 
+/// True if `candidate` conflicts hierarchically with any already-accepted path:
+/// it equals an accepted path, it lives inside one (`p/candidate`), or an
+/// accepted path lives inside it (`candidate/p`).
+///
+/// `arb_valid_path` can generate both a path and one of its ancestors (for
+/// example `1` and `1/_`). [`ArchiveWriter`] intentionally rejects such
+/// combinations, so the tests filter them out before adding entries instead of
+/// panicking on a legitimate error.
+fn conflicts_with_any(seen: &HashSet<String>, candidate: &str) -> bool {
+    seen.iter().any(|p| {
+        p == candidate
+            || p.starts_with(&format!("{candidate}/"))
+            || candidate.starts_with(&format!("{p}/"))
+    })
+}
+
+/// Reduces generated entries to a set that contains no duplicate or
+/// hierarchical (file vs directory) conflicts, keeping the first occurrence.
+fn dedupe_conflicts(entries: Vec<(String, Vec<u8>)>) -> Vec<(String, Vec<u8>)> {
+    let mut unique_entries = Vec::new();
+    let mut seen = HashSet::new();
+    for (path, data) in entries {
+        if !conflicts_with_any(&seen, &path) {
+            seen.insert(path.clone());
+            unique_entries.push((path, data));
+        }
+    }
+    unique_entries
+}
+
+#[test]
+fn conflict_filter_keeps_only_consistent_paths() {
+    let mut seen = HashSet::new();
+    assert!(!conflicts_with_any(&seen, "a/b"));
+    seen.insert("a/b".to_string());
+    // Exact duplicate.
+    assert!(conflicts_with_any(&seen, "a/b"));
+    // Ancestor of an accepted path.
+    assert!(conflicts_with_any(&seen, "a"));
+    // Descendant of an accepted path.
+    assert!(conflicts_with_any(&seen, "a/b/c"));
+    // Unrelated path.
+    assert!(!conflicts_with_any(&seen, "c/d"));
+
+    // The helper roots out the failing proptest shape (`1` and `1/_`).
+    let deduped = dedupe_conflicts(vec![
+        ("1".to_string(), vec![0]),
+        ("1/_".to_string(), vec![1]),
+    ]);
+    assert_eq!(deduped, vec![("1".to_string(), vec![0])]);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 100,
@@ -230,20 +282,17 @@ proptest! {
         let registry = Registry::new();
         let algorithm = registry.get_by_name("rle").unwrap();
 
-        // Deduplicate paths while preserving unique entries
-        let mut unique_entries = Vec::new();
-        let mut seen = HashSet::new();
-        for (path, data) in entries {
-            if seen.insert(path.clone()) {
-                unique_entries.push((path, data));
-            }
-        }
+        // Deduplicate and drop hierarchically conflicting paths (file vs
+        // directory), which proptest can generate and the writer rejects.
+        let unique_entries = dedupe_conflicts(entries);
 
         let mut buffer = Vec::new();
         {
             let mut writer = ArchiveWriter::new(Cursor::new(&mut buffer), algorithm).unwrap();
             for (path, data) in &unique_entries {
-                writer.add_file(path, data, 0o644, 0).unwrap();
+                writer
+                    .add_file(path, data, 0o644, 0)
+                    .expect("filtered entries must not conflict");
             }
             writer.finish().unwrap();
         }
@@ -268,19 +317,17 @@ proptest! {
         let registry = Registry::new();
         let algorithm = registry.get_by_name("huffman").unwrap();
 
-        let mut unique_entries = Vec::new();
-        let mut seen = HashSet::new();
-        for (path, data) in entries {
-            if seen.insert(path.clone()) {
-                unique_entries.push((path, data));
-            }
-        }
+        // Deduplicate and drop hierarchically conflicting paths (file vs
+        // directory), which proptest can generate and the writer rejects.
+        let unique_entries = dedupe_conflicts(entries);
 
         let mut buffer = Vec::new();
         {
             let mut writer = ArchiveWriter::new(Cursor::new(&mut buffer), algorithm).unwrap();
             for (path, data) in &unique_entries {
-                writer.add_file(path, data, 0o644, 0).unwrap();
+                writer
+                    .add_file(path, data, 0o644, 0)
+                    .expect("filtered entries must not conflict");
             }
             writer.finish().unwrap();
         }

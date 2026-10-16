@@ -16,6 +16,12 @@ RLE is a small, dependency-free format intended for predictable behavior and
 fast operation. It is not a general-purpose replacement for modern formats
 such as zstd or gzip; data without repeated bytes may become slightly larger.
 
+RLE compresses incrementally: the filesystem compressor streams files in
+64 KiB chunks and concatenates each chunk's blocks, so the uncompressed file
+is never fully held in memory. Chunk edges only cost a few extra control
+bytes; the output remains an ordinary RLE stream readable by any version 1
+decoder.
+
 ## Huffman
 
 Huffman coding is a built-in algorithm with ID `2`. It generates canonical
@@ -33,6 +39,27 @@ Limitations:
 - **Uniformly distributed or incompressible data**: when byte frequencies are
   nearly uniform (or data is already compressed/encrypted), Huffman codes cannot
   reduce the size and may add minor overhead for the code table.
+- **Not streamable**: Huffman codes depend on frequencies across the whole
+  input, so the compressor still buffers one file at a time (capped at 64 MiB
+  per entry, the same cap the reader enforces). Only RLE compresses in chunks.
+
+## Memory use when compressing
+
+Before, every file was read fully into memory (`fs::read`) and then
+compressed, so peak memory per file was roughly `uncompressed + compressed`.
+Now the RLE path peaks at roughly `compressed + 64 KiB` (one chunk plus the
+output), and files over the 64 MiB per-entry cap fail fast with
+`UnreasonableSize` instead of exhausting memory. To compare on a large file:
+
+```text
+# build once, then time peak memory on the same input for each algorithm
+cargo build --release
+/usr/bin/time -v ./target/release/mycompress compress big.bin -a rle -o rle.mcz
+/usr/bin/time -v ./target/release/mycompress compress big.bin -a huffman -o h.mcz
+```
+
+Watch "Maximum resident set size": RLE stays nearly flat as the input grows,
+while Huffman grows with the file (expected — see limitation above).
 
 ## Algorithm Comparison
 

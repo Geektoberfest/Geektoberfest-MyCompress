@@ -17,12 +17,15 @@
 //! allocate.
 //!
 //! `decompress(compress(data)) == data` holds for every input, including the
-//! empty input (which compresses to the empty output). See also
+//! empty input (which compresses to the empty output). The stream is also
+//! chunk-concatenable: compressing pieces independently and concatenating the
+//! outputs still decodes to the concatenated input, so files can be encoded in
+//! fixed-size chunks without holding the whole file in memory. See also
 //! `docs/algorithms.md`.
 
 use crate::error::{Error, Result};
 
-use super::{AlgorithmId, CompressionAlgorithm};
+use super::{AlgorithmId, CompressionAlgorithm, MAX_DECOMPRESSED_BYTES};
 
 /// Longest run a single repeat block can encode.
 const MAX_RUN: usize = 130;
@@ -88,7 +91,11 @@ fn encode(data: &[u8]) -> Vec<u8> {
 }
 
 fn decode(data: &[u8]) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(data.len());
+    // Bound initial capacity so a tiny input can't force a huge alloc.
+    let mut out = Vec::new();
+    out.try_reserve(data.len().min(1024)).map_err(|_| {
+        Error::CorruptArchive("cannot allocate memory for decompression".to_string())
+    })?;
     let mut i = 0usize;
 
     while i < data.len() {
@@ -105,6 +112,14 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
                     data.len() - i
                 )));
             }
+            out.try_reserve(len).map_err(|_| {
+                Error::CorruptArchive("cannot allocate memory for decompression".to_string())
+            })?;
+            if out.len() as u64 + len as u64 > MAX_DECOMPRESSED_BYTES {
+                return Err(Error::CorruptArchive(format!(
+                    "RLE output exceeds limit {MAX_DECOMPRESSED_BYTES}"
+                )));
+            }
             out.extend_from_slice(&data[i..end]);
             i = end;
         } else {
@@ -117,7 +132,15 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
             let new_len = out.len().checked_add(run).ok_or_else(|| {
                 Error::CorruptArchive("RLE decompressed size overflows usize".to_string())
             })?;
-            out.resize(new_len, data[i]);
+            if new_len as u64 > MAX_DECOMPRESSED_BYTES {
+                return Err(Error::CorruptArchive(format!(
+                    "RLE output {new_len} exceeds limit {MAX_DECOMPRESSED_BYTES}"
+                )));
+            }
+            out.try_reserve(run).map_err(|_| {
+                Error::CorruptArchive("cannot allocate memory for decompression".to_string())
+            })?;
+            out.extend(std::iter::repeat(data[i]).take(run));
             i += 1;
         }
     }

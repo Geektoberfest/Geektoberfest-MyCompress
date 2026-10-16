@@ -47,6 +47,8 @@ pub const MAX_PATH_LEN: usize = 4096;
 pub const MAX_ENTRY_COUNT: u32 = 10_000_000;
 
 /// Largest per-entry uncompressed size accepted when reading (1 TiB).
+/// Note: decompression itself is additionally capped at 64 MiB per entry
+/// (see `algo::MAX_DECOMPRESSED_BYTES`) so tiny inputs can't force huge allocs.
 pub const MAX_ENTRY_UNCOMPRESSED_SIZE: u64 = 1 << 40;
 
 #[cfg(test)]

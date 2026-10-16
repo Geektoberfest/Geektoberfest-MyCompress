@@ -4,6 +4,11 @@ All notable changes to MyCompress are documented here.
 
 ## [Unreleased]
 
+- Fixed a critical archive-writer bug where a file added after one of its
+  descendants was accepted, letting the writer emit archives the reader
+  rejects (file/directory path conflict).
+- Made the archive property tests skip hierarchically conflicting paths
+  instead of panicking on the writer's (correct) error.
 - Continue improving documentation and release packaging.
 
 ## [0.1.0] - 2026-10-04

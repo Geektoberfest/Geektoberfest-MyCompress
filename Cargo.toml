@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["mycompress-core", "mycompress-cli"]
+members = ["mycompress-core", "mycompress-cli", "mycompress-gui"]
 
 [workspace.package]
 version = "0.1.0"

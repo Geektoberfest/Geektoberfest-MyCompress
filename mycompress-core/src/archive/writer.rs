@@ -120,21 +120,38 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         Ok(())
     }
 
-    /// Rejects duplicate paths and files stored inside files.
+    /// Rejects duplicate paths and file/directory conflicts.
+    ///
+    /// The checks are order-independent and mirror the reader's
+    /// `validate_entry_set`, so the writer can never produce an archive that
+    /// its own reader would refuse to open:
+    ///
+    /// - the new entry may not live inside a path that was stored as a file,
+    ///   whatever kind of entry the new one is;
+    /// - a new **file** may not become the parent of an already-stored entry.
     fn check_new_path(&self, path: &str, kind: EntryKind) -> Result<()> {
         paths::parse_archive_path(path)?;
         if self.paths.contains(path) {
             return Err(Error::DuplicatePath(path.to_string()));
         }
-        if kind == EntryKind::File {
-            for ancestor in Path::new(path).ancestors().skip(1) {
-                if let Some(ancestor) = ancestor.to_str() {
-                    if self.file_paths.contains(ancestor) {
-                        return Err(Error::ConflictingPath(format!(
-                            "'{path}' cannot be stored inside '{ancestor}', which was added as a file"
-                        )));
-                    }
+        // The new entry must not be placed inside an existing file entry.
+        for ancestor in Path::new(path).ancestors().skip(1) {
+            if let Some(ancestor) = ancestor.to_str() {
+                if self.file_paths.contains(ancestor) {
+                    return Err(Error::ConflictingPath(format!(
+                        "'{path}' cannot be stored inside '{ancestor}', which was added as a file"
+                    )));
                 }
+            }
+        }
+        // A new file must not become the parent of an existing entry, even if
+        // that existing entry was added first.
+        if kind == EntryKind::File {
+            let prefix = format!("{path}/");
+            if let Some(descendant) = self.paths.iter().find(|seen| seen.starts_with(&prefix)) {
+                return Err(Error::ConflictingPath(format!(
+                    "'{descendant}' cannot be stored inside '{path}', which was added as a file"
+                )));
             }
         }
         Ok(())

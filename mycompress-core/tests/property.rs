@@ -12,6 +12,7 @@ use proptest::prelude::*;
 
 use mycompress_core::algo::{CompressionAlgorithm, Huffman, Rle};
 use mycompress_core::archive::{ArchiveReader, ArchiveWriter};
+use mycompress_core::paths::parse_archive_path;
 use mycompress_core::Registry;
 
 /// Strategy generating arbitrary byte buffers from 0 to 16,384 bytes.
@@ -96,9 +97,34 @@ fn arb_all_byte_values() -> impl Strategy<Value = Vec<u8>> {
     })
 }
 
-/// Strategy generating valid relative archive paths (lowercase ascii with optional subdirectories).
+/// Strategy generating valid relative archive paths (lowercase ascii with
+/// optional subdirectories).
+///
+/// The joined path is passed through the same validator the archive writer
+/// uses ([`parse_archive_path`]). That matters because the `[a-z0-9_]`
+/// alphabet can spell Windows-reserved device names (`aux`, `con`, `nul`,
+/// `com1`, ...), which the validator rejects; without the filter the property
+/// tests would hand the writer a path it is supposed to refuse and fail on a
+/// legitimate error.
 fn arb_valid_path() -> impl Strategy<Value = String> {
-    prop::collection::vec("[a-z0-9_]{1,12}", 1..=3).prop_map(|components| components.join("/"))
+    prop::collection::vec("[a-z0-9_]{1,12}", 1..=3)
+        .prop_map(|components| components.join("/"))
+        .prop_filter("path must pass the archive path validator", |path| {
+            parse_archive_path(path).is_ok()
+        })
+}
+
+/// The reason [`arb_valid_path`] has to validate: these look harmless but are
+/// rejected by the production path rules, so the generator must never emit
+/// them.
+#[test]
+fn windows_reserved_names_are_rejected_by_the_validator() {
+    for name in ["aux", "con", "nul", "prn", "com1", "lpt9", "a/aux"] {
+        assert!(
+            parse_archive_path(name).is_err(),
+            "'{name}' is expected to be rejected"
+        );
+    }
 }
 
 /// True if `candidate` conflicts hierarchically with any already-accepted path:
@@ -159,6 +185,14 @@ proptest! {
         failure_persistence: Some(Box::new(proptest::test_runner::FileFailurePersistence::WithSource("proptest-regressions"))),
         .. ProptestConfig::default()
     })]
+
+    #[test]
+    fn generated_archive_paths_are_valid(path in arb_valid_path()) {
+        prop_assert!(
+            parse_archive_path(&path).is_ok(),
+            "path generator produced an invalid archive path: {path}"
+        );
+    }
 
     #[test]
     fn prop_rle_roundtrip_arbitrary(data in arb_bytes()) {

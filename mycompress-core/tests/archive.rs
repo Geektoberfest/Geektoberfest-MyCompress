@@ -103,6 +103,44 @@ fn writer_rejects_duplicate_and_conflicting_paths() {
     writer.finish().unwrap();
 }
 
+/// The writer must reject file/directory conflicts no matter in which order
+/// the entries are added, so it can never emit an archive that the reader
+/// (which validates the finished entry set) would reject.
+#[test]
+fn writer_rejects_conflicts_regardless_of_insertion_order() {
+    let registry = Registry::new();
+    let algorithm = registry.get_by_name("rle").unwrap();
+
+    // Descendant file added before its ancestor: still a conflict.
+    let mut buffer = Vec::new();
+    let mut writer = ArchiveWriter::new(Cursor::new(&mut buffer), algorithm.clone()).unwrap();
+    writer.add_file("a/b", &[2], 0o644, 0).unwrap();
+    assert!(matches!(
+        writer.add_file("a", &[1], 0o644, 0),
+        Err(Error::ConflictingPath(_))
+    ));
+
+    // A directory added under an existing file is also a conflict.
+    let mut buffer = Vec::new();
+    let mut writer = ArchiveWriter::new(Cursor::new(&mut buffer), algorithm.clone()).unwrap();
+    writer.add_file("a", &[1], 0o644, 0).unwrap();
+    assert!(matches!(
+        writer.add_dir("a/b", 0o755, 0),
+        Err(Error::ConflictingPath(_))
+    ));
+
+    // A directory that was added first may still gain children.
+    let mut buffer = Vec::new();
+    let mut writer = ArchiveWriter::new(Cursor::new(&mut buffer), algorithm).unwrap();
+    writer.add_dir("a", 0o755, 0).unwrap();
+    writer.add_file("a/b", &[2], 0o644, 0).unwrap();
+    writer.add_dir("a/c", 0o755, 0).unwrap();
+    writer.finish().unwrap();
+
+    let reader = ArchiveReader::read_from(Cursor::new(buffer), &registry).unwrap();
+    assert_eq!(reader.entry_count(), 3);
+}
+
 #[test]
 fn bad_magic_is_rejected() {
     let mut bytes = write_archive(&[("a.txt", &b"hello"[..])], &[]);
